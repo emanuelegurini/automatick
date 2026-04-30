@@ -15,7 +15,7 @@
 - `cd backend && python3.11 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`: prepares backend dependencies.
 - `cd backend && uvicorn app.main:app --reload`: runs the FastAPI backend locally.
 - `cd backend && source .venv/bin/activate && python -m unittest discover -s tests`: runs focused backend unit tests.
-- `cd infrastructure/cdk && pip install -r requirements.txt && cdk synth`: validates CDK synthesis.
+- `cd infrastructure/cdk && python3.11 -m pip install -r requirements.txt && cdk synth`: validates CDK synthesis.
 - `./deploy.sh --email admin@example.com --region us-east-1`: runs the default headless Freshdesk deployment flow.
 - `cd frontend && npm install && npm run build && npm run lint`: validates the optional legacy UI when `ENABLE_FRONTEND=true`.
 

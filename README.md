@@ -132,7 +132,7 @@ Deployment dry check:
 
 ```bash
 cd infrastructure/cdk
-pip install -r requirements.txt
+python3.11 -m pip install -r requirements.txt
 ENABLE_FRONTEND=false ENABLE_JIRA=false ENABLE_FRESHDESK=true cdk synth
 ```
 

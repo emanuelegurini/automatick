@@ -60,6 +60,7 @@ export AUTOMATICK_MODE="${AUTOMATICK_MODE:-headless}"
 export ENABLE_FRONTEND="${ENABLE_FRONTEND:-false}"
 export ENABLE_JIRA="${ENABLE_JIRA:-false}"
 export ENABLE_FRESHDESK="${ENABLE_FRESHDESK:-true}"
+export CDK_PYTHON="${CDK_PYTHON:-python3.11}"
 if [ -z "${BACKEND_DOCKER_PLATFORM:-}" ]; then
   case "$(uname -m)" in
     aarch64|arm64)
@@ -84,6 +85,7 @@ echo "Region: $REGION"
 echo "Mode: $AUTOMATICK_MODE"
 echo "Frontend: $ENABLE_FRONTEND | Jira: $ENABLE_JIRA | Freshdesk: $ENABLE_FRESHDESK"
 echo "Backend platform: $BACKEND_DOCKER_PLATFORM | ECS CPU: $BACKEND_CPU_ARCHITECTURE"
+echo "CDK Python: $CDK_PYTHON"
 echo ""
 
 # Tee all output (stdout + stderr) to a timestamped log file
@@ -447,7 +449,7 @@ fi
 cd infrastructure/cdk
 
 # Install dependencies
-pip install -r requirements.txt
+"$CDK_PYTHON" -m pip install -r requirements.txt
 
 # Bootstrap if needed
 cdk bootstrap "aws://$ACCOUNT_ID/$REGION"

@@ -59,7 +59,9 @@ else
 fi
 
 # Python 3.11
-if ! python3 --version | grep -q "3.11"; then
+if command -v python3.11 &> /dev/null; then
+    echo "✓ Python 3.11 installed"
+elif ! python3 --version | grep -q "3.11"; then
     echo "⚠️  Python 3.11 recommended"
 fi
 echo "✓ Python installed"
