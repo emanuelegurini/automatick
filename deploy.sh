@@ -429,6 +429,37 @@ else
   echo "✓ Frontend pre-build skipped (ENABLE_FRONTEND=$ENABLE_FRONTEND)"
 fi
 
+# API Gateway requires an account-level CloudWatch Logs role before a stage can
+# enable execution logging. CDK also models this, but setting it before deploy
+# avoids first-deploy ordering and propagation failures.
+echo "Configuring API Gateway CloudWatch Logs role..."
+APIGW_LOGS_ROLE_NAME="automatick-apigateway-cloudwatch-logs-role"
+APIGW_LOGS_ROLE_ARN=$(aws iam get-role \
+  --role-name "$APIGW_LOGS_ROLE_NAME" \
+  --query 'Role.Arn' \
+  --output text 2>/dev/null || true)
+
+if [ -z "$APIGW_LOGS_ROLE_ARN" ] || [ "$APIGW_LOGS_ROLE_ARN" = "None" ]; then
+  echo "  Creating role: $APIGW_LOGS_ROLE_NAME"
+  APIGW_LOGS_ROLE_ARN=$(aws iam create-role \
+    --role-name "$APIGW_LOGS_ROLE_NAME" \
+    --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"apigateway.amazonaws.com"},"Action":"sts:AssumeRole"}]}' \
+    --query 'Role.Arn' \
+    --output text)
+fi
+
+aws iam attach-role-policy \
+  --role-name "$APIGW_LOGS_ROLE_NAME" \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs >/dev/null 2>&1 || true
+
+aws apigateway update-account \
+  --patch-operations op=replace,path=/cloudwatchRoleArn,value="$APIGW_LOGS_ROLE_ARN" \
+  --region "$REGION" >/dev/null
+
+echo "✓ API Gateway CloudWatch Logs role configured: $APIGW_LOGS_ROLE_ARN"
+echo "  Waiting for API Gateway account setting propagation..."
+sleep 10
+
 # Step 5: Deploy CDK stacks (READS outputs.json WITH REAL ARN)
 echo -e "${YELLOW}[5/14] Deploying CDK infrastructure...${NC}"
 echo ""
