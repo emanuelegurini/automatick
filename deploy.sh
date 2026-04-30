@@ -434,6 +434,7 @@ fi
 # avoids first-deploy ordering and propagation failures.
 echo "Configuring API Gateway CloudWatch Logs role..."
 APIGW_LOGS_ROLE_NAME="automatick-apigateway-cloudwatch-logs-role"
+APIGW_LOGS_TRUST_POLICY='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"apigateway.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
 APIGW_LOGS_ROLE_ARN=$(aws iam get-role \
   --role-name "$APIGW_LOGS_ROLE_NAME" \
   --query 'Role.Arn' \
@@ -443,14 +444,22 @@ if [ -z "$APIGW_LOGS_ROLE_ARN" ] || [ "$APIGW_LOGS_ROLE_ARN" = "None" ]; then
   echo "  Creating role: $APIGW_LOGS_ROLE_NAME"
   APIGW_LOGS_ROLE_ARN=$(aws iam create-role \
     --role-name "$APIGW_LOGS_ROLE_NAME" \
-    --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"apigateway.amazonaws.com"},"Action":"sts:AssumeRole"}]}' \
+    --assume-role-policy-document "$APIGW_LOGS_TRUST_POLICY" \
     --query 'Role.Arn' \
     --output text)
 fi
 
+aws iam wait role-exists --role-name "$APIGW_LOGS_ROLE_NAME"
+aws iam update-assume-role-policy \
+  --role-name "$APIGW_LOGS_ROLE_NAME" \
+  --policy-document "$APIGW_LOGS_TRUST_POLICY" >/dev/null
+
 aws iam attach-role-policy \
   --role-name "$APIGW_LOGS_ROLE_NAME" \
   --policy-arn arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs >/dev/null 2>&1 || true
+
+echo "  Waiting for IAM role trust/policy propagation..."
+sleep 30
 
 aws apigateway update-account \
   --patch-operations op=replace,path=/cloudwatchRoleArn,value="$APIGW_LOGS_ROLE_ARN" \
