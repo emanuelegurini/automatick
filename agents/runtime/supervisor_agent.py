@@ -11,7 +11,7 @@ from supervisor_tools import create_supervisor_tools
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-MODEL = os.getenv('MODEL_ID', os.getenv('MODEL', 'global.anthropic.claude-haiku-4-5-20251001-v1:0'))
+MODEL = os.getenv('MODEL_ID', os.getenv('MODEL', 'us.amazon.nova-pro-v1:0'))
 # SUPERVISOR_MAX_TOKENS is isolated from specialist MAX_TOKENS (which env_config.txt sets to 512).
 # Supervisor needs 4096 to relay specialist responses without MaxTokensReachedException.
 # Specialists use their own context_tools.py MAX_TOKENS default (also 4096).

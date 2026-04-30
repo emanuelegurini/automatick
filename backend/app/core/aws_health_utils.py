@@ -50,7 +50,7 @@ def generate_event_summary(events, category):
 
 Summary:"""
         
-        # Call Bedrock Claude
+        # Call Bedrock model
         response = bedrock.invoke_model(
             modelId=settings.MODEL,
             body=json.dumps({

@@ -266,7 +266,7 @@ class BackendStack(Stack):
                     "CHAT_REQUESTS_TABLE": chat_table.table_name,
                     
                     # Bedrock Configuration (for Runtime agents)
-                    "MODEL": os.getenv('MODEL', 'global.anthropic.claude-sonnet-4-20250514-v1:0'),
+                    "MODEL": os.getenv('MODEL', 'us.amazon.nova-pro-v1:0'),
                     "BEDROCK_KNOWLEDGE_BASE_ID": os.getenv('BEDROCK_KNOWLEDGE_BASE_ID', ''),
                     
                     # Agent Prompts (for Runtime agents) - multi-line strings from config_loader.py

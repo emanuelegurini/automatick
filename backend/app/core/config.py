@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     CLOUDFRONT_DOMAIN: Optional[str] = ""
     
     # Bedrock Model Configuration
-    MODEL: str = "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+    MODEL: str = "us.amazon.nova-pro-v1:0"
     AWS_PROFILE: Optional[str] = None
     BEDROCK_KNOWLEDGE_BASE_ID: Optional[str] = ""
     

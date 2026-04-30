@@ -81,9 +81,9 @@ echo "✓ AgentCore CLI installed"
 # Bedrock model access
 REGION=${1:-us-east-1}
 echo "Checking Bedrock model access..."
-if ! aws bedrock list-foundation-models --region $REGION --query "modelSummaries[?modelId=='us.anthropic.claude-3-7-sonnet-20250219-v1:0'].modelId" --output text | grep -q "claude"; then
-    echo "⚠️  Claude Sonnet model access required"
-    echo "   Enable at: https://console.aws.amazon.com/bedrock/home?region=$REGION#/modelaccess"
+if ! aws bedrock list-foundation-models --region $REGION --query "modelSummaries[?modelId=='amazon.nova-pro-v1:0'].modelId" --output text | grep -q "amazon.nova-pro"; then
+    echo "⚠️  Amazon Nova Pro model access required"
+    echo "   Open Nova Pro in the Bedrock model catalog for region $REGION and verify it is available"
 fi
 
 echo ""

@@ -82,7 +82,7 @@ Required for the default headless path:
 | `FRESHDESK_DOMAIN` | Freshdesk domain, such as `your-company.freshdesk.com` |
 | `FRESHDESK_API_KEY` | Freshdesk API key for ticket reads and private notes |
 | `FRESHDESK_WEBHOOK_SECRET` | Shared secret expected in webhook header |
-| `MODEL` | Bedrock model ID for AgentCore runtimes |
+| `MODEL` | Bedrock model ID for AgentCore runtimes. Default: `us.amazon.nova-pro-v1:0` |
 
 Optional:
 

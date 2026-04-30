@@ -19,7 +19,7 @@ from strands.multiagent.a2a import A2AServer
 
 logger = logging.getLogger(__name__)
 
-MODEL = os.getenv('MODEL_ID', os.getenv('MODEL', 'global.anthropic.claude-sonnet-4-20250514-v1:0'))
+MODEL = os.getenv('MODEL_ID', os.getenv('MODEL', 'us.amazon.nova-pro-v1:0'))
 MAX_TOKENS = int(os.getenv('MAX_TOKENS', '4096'))
 # Module-level context — set before each agent invocation
 _current_ctx = {"account_name": "", "region": "us-east-1"}
