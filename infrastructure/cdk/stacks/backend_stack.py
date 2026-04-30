@@ -364,6 +364,18 @@ class BackendStack(Stack):
         ]
         if frontend_url and frontend_url.startswith('https://') and frontend_url not in allowed_origins:
             allowed_origins.append(frontend_url)
+
+        api_gateway_logs_role = iam.Role(self, "ApiGatewayCloudWatchLogsRole",
+            assumed_by=iam.ServicePrincipal("apigateway.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "service-role/AmazonAPIGatewayPushToCloudWatchLogs"
+                )
+            ]
+        )
+        api_gateway_account = apigw.CfnAccount(self, "ApiGatewayAccount",
+            cloud_watch_role_arn=api_gateway_logs_role.role_arn
+        )
         
         api = apigw.RestApi(self, "BackendAPI",
             rest_api_name="msp-assistant-api",
@@ -383,6 +395,7 @@ class BackendStack(Stack):
                 metrics_enabled=True
             )
         )
+        api.deployment_stage.node.add_dependency(api_gateway_account)
         
         # Cognito authorizer
         auth = apigw.CognitoUserPoolsAuthorizer(self, "Authorizer",
