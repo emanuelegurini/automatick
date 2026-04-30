@@ -227,6 +227,13 @@ class BackendStack(Stack):
             )
         )
         
+        backend_architecture = os.getenv("BACKEND_CPU_ARCHITECTURE", "X86_64").upper()
+        backend_cpu_architecture = (
+            ecs.CpuArchitecture.ARM64
+            if backend_architecture == "ARM64"
+            else ecs.CpuArchitecture.X86_64
+        )
+
         # 5. ECS Fargate + ALB (AWS Solutions Construct)
         # Note: AlbToFargate creates its own VPC automatically
         # Using public ALB for testing (API Gateway VPC Link requires NLB, not ALB)
@@ -298,7 +305,11 @@ class BackendStack(Stack):
             fargate_task_definition_props=ecs.FargateTaskDefinitionProps(
                 task_role=task_role,
                 cpu=512,  # Task CPU must be >= sum of container CPUs
-                memory_limit_mib=1024  # Task memory must be >= sum of container memory
+                memory_limit_mib=1024,  # Task memory must be >= sum of container memory
+                runtime_platform=ecs.RuntimePlatform(
+                    cpu_architecture=backend_cpu_architecture,
+                    operating_system_family=ecs.OperatingSystemFamily.LINUX
+                )
             ),
             fargate_service_props={
                 "desired_count": 2,

@@ -60,6 +60,20 @@ export AUTOMATICK_MODE="${AUTOMATICK_MODE:-headless}"
 export ENABLE_FRONTEND="${ENABLE_FRONTEND:-false}"
 export ENABLE_JIRA="${ENABLE_JIRA:-false}"
 export ENABLE_FRESHDESK="${ENABLE_FRESHDESK:-true}"
+if [ -z "${BACKEND_DOCKER_PLATFORM:-}" ]; then
+  case "$(uname -m)" in
+    aarch64|arm64)
+      export BACKEND_DOCKER_PLATFORM="linux/arm64"
+      export BACKEND_CPU_ARCHITECTURE="${BACKEND_CPU_ARCHITECTURE:-ARM64}"
+      ;;
+    *)
+      export BACKEND_DOCKER_PLATFORM="linux/amd64"
+      export BACKEND_CPU_ARCHITECTURE="${BACKEND_CPU_ARCHITECTURE:-X86_64}"
+      ;;
+  esac
+else
+  export BACKEND_CPU_ARCHITECTURE="${BACKEND_CPU_ARCHITECTURE:-X86_64}"
+fi
 
 echo -e "${GREEN}╔════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║  Automatick → AgentCore Deployment        ║${NC}"
@@ -69,6 +83,7 @@ echo "Email: $EMAIL"
 echo "Region: $REGION"
 echo "Mode: $AUTOMATICK_MODE"
 echo "Frontend: $ENABLE_FRONTEND | Jira: $ENABLE_JIRA | Freshdesk: $ENABLE_FRESHDESK"
+echo "Backend platform: $BACKEND_DOCKER_PLATFORM | ECS CPU: $BACKEND_CPU_ARCHITECTURE"
 echo ""
 
 # Tee all output (stdout + stderr) to a timestamped log file
@@ -150,7 +165,7 @@ ECR_REPO_NAME="msp-assistant-backend"
 ECR_REPO_URI="$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$ECR_REPO_NAME"
 
 echo "Building Docker image (no cache for fresh build)..."
-docker build --platform linux/amd64 --no-cache -t msp-assistant-backend:latest -f backend/Dockerfile .
+docker build --platform "$BACKEND_DOCKER_PLATFORM" --no-cache -t msp-assistant-backend:latest -f backend/Dockerfile .
 
 # Verify build succeeded
 if ! docker images msp-assistant-backend:latest --format "{{.ID}}" | grep -q .; then
