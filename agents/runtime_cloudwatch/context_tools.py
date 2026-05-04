@@ -24,6 +24,8 @@ MAX_TOKENS = int(os.getenv('MAX_TOKENS', '4096'))
 BEDROCK_STREAMING = os.getenv('BEDROCK_STREAMING', 'false').lower() in ('1', 'true', 'yes', 'on')
 NOVA_TOOL_ADDITIONAL_REQUEST_FIELDS = {"inferenceConfig": {"topK": 1}}
 _NOVA_TOP_LEVEL_SCHEMA_KEYS = {"type", "properties", "required"}
+_NOVA_PROPERTY_SCHEMA_KEYS = {"type", "description", "enum", "items", "properties", "required"}
+_JSON_SCHEMA_TYPES = {"string", "integer", "number", "boolean", "array", "object"}
 # Module-level context — set before each agent invocation
 _current_ctx = {"account_name": "", "region": "us-east-1"}
 
@@ -78,6 +80,128 @@ def _inject_context_into_tools(tools):
         tool.stream = _make_patched(original_stream, accepts_account, accepts_region)
 
     logger.info(f"Patched {patched_count}/{len(tools)} tools with context injection")
+
+
+def _flatten_schema_variant(schema):
+    """Flatten composition/nullability into a single schema Nova can reliably use."""
+    if not isinstance(schema, dict):
+        return {"type": "string"}
+
+    for keyword in ("anyOf", "oneOf", "allOf"):
+        variants = schema.get(keyword)
+        if not isinstance(variants, list) or not variants:
+            continue
+        non_null = [
+            variant for variant in variants
+            if not (isinstance(variant, dict) and variant.get("type") == "null")
+        ]
+        if non_null:
+            selected = dict(non_null[0])
+            for key in ("description", "default"):
+                if key in schema and key not in selected:
+                    selected[key] = schema[key]
+            return selected
+
+    return schema
+
+
+def _normalize_schema_type(schema):
+    schema_type = schema.get("type")
+    if isinstance(schema_type, list):
+        schema_type = next((item for item in schema_type if item != "null"), None)
+    if schema_type in _JSON_SCHEMA_TYPES:
+        return schema_type
+    if isinstance(schema.get("properties"), dict):
+        return "object"
+    if "items" in schema:
+        return "array"
+    return "string"
+
+
+def _sanitize_property_schema_for_nova(schema):
+    """Return a conservative JSON schema subset for nested Nova tool properties."""
+    schema = _flatten_schema_variant(schema)
+    if not isinstance(schema, dict):
+        return {"type": "string"}
+
+    schema_type = _normalize_schema_type(schema)
+    clean = {"type": schema_type}
+
+    description = schema.get("description")
+    if isinstance(description, str) and description.strip():
+        clean["description"] = description.strip()[:1000]
+
+    enum = schema.get("enum")
+    if isinstance(enum, list) and enum:
+        primitive_enum = [
+            value for value in enum
+            if isinstance(value, (str, int, float, bool))
+        ]
+        if primitive_enum:
+            clean["enum"] = primitive_enum[:100]
+
+    if schema_type == "array":
+        clean["items"] = _sanitize_property_schema_for_nova(schema.get("items", {"type": "string"}))
+    elif schema_type == "object":
+        properties = schema.get("properties")
+        if isinstance(properties, dict) and properties:
+            clean_properties = {
+                key: _sanitize_property_schema_for_nova(value)
+                for key, value in properties.items()
+                if isinstance(key, str)
+            }
+            if clean_properties:
+                clean["properties"] = clean_properties
+                required = schema.get("required")
+                if isinstance(required, list):
+                    clean_required = [
+                        item for item in required
+                        if isinstance(item, str) and item in clean_properties
+                    ]
+                    if clean_required:
+                        clean["required"] = clean_required
+
+    return {key: value for key, value in clean.items() if key in _NOVA_PROPERTY_SCHEMA_KEYS}
+
+
+def _sanitize_tool_specs_for_nova(tools):
+    """Mutate Strands tool specs to a Nova-friendly JSON schema subset."""
+    sanitized_count = 0
+    for tool in tools:
+        spec = getattr(tool, "tool_spec", None)
+        if not isinstance(spec, dict):
+            continue
+        input_schema = spec.get("inputSchema", {}).get("json")
+        if not isinstance(input_schema, dict):
+            continue
+
+        properties = input_schema.get("properties", {})
+        clean_properties = {}
+        if isinstance(properties, dict):
+            clean_properties = {
+                key: _sanitize_property_schema_for_nova(value)
+                for key, value in properties.items()
+                if isinstance(key, str)
+            }
+
+        clean_schema = {
+            "type": "object",
+            "properties": clean_properties,
+        }
+
+        required = input_schema.get("required")
+        if isinstance(required, list):
+            clean_required = [
+                item for item in required
+                if isinstance(item, str) and item in clean_properties
+            ]
+            if clean_required:
+                clean_schema["required"] = clean_required
+
+        spec.setdefault("inputSchema", {})["json"] = clean_schema
+        sanitized_count += 1
+
+    logger.info(f"Sanitized {sanitized_count}/{len(tools)} tool schemas for Nova")
 
 
 def _log_tool_specs_for_nova(tools):
@@ -153,6 +277,7 @@ def create_context_agent(name, description, system_prompt, mcp_client, max_token
     """
     tools = mcp_client.list_tools_sync()
     _inject_context_into_tools(tools)
+    _sanitize_tool_specs_for_nova(tools)
     _log_tool_specs_for_nova(tools)
     logger.info(
         f"Bedrock model configured: model={MODEL}, streaming={BEDROCK_STREAMING}, "
