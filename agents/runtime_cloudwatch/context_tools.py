@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 MODEL = os.getenv('MODEL_ID', os.getenv('MODEL', 'us.amazon.nova-pro-v1:0'))
 MAX_TOKENS = int(os.getenv('MAX_TOKENS', '4096'))
+BEDROCK_STREAMING = os.getenv('BEDROCK_STREAMING', 'false').lower() in ('1', 'true', 'yes', 'on')
 NOVA_TOOL_ADDITIONAL_REQUEST_FIELDS = {"inferenceConfig": {"topK": 1}}
 _NOVA_TOP_LEVEL_SCHEMA_KEYS = {"type", "properties", "required"}
 # Module-level context — set before each agent invocation
@@ -153,6 +154,10 @@ def create_context_agent(name, description, system_prompt, mcp_client, max_token
     tools = mcp_client.list_tools_sync()
     _inject_context_into_tools(tools)
     _log_tool_specs_for_nova(tools)
+    logger.info(
+        f"Bedrock model configured: model={MODEL}, streaming={BEDROCK_STREAMING}, "
+        f"temperature=0, topK=1, max_tokens={max_tokens or MAX_TOKENS}"
+    )
 
     return Agent(
         name=name,
@@ -160,6 +165,7 @@ def create_context_agent(name, description, system_prompt, mcp_client, max_token
         model=BedrockModel(
             model_id=MODEL,
             max_tokens=max_tokens or MAX_TOKENS,
+            streaming=BEDROCK_STREAMING,
             temperature=0,
             additional_request_fields=NOVA_TOOL_ADDITIONAL_REQUEST_FIELDS,
         ),

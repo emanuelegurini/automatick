@@ -71,7 +71,8 @@ Use a shell with AWS credentials for the target account and region.
 
 ```bash
 export REGION=us-east-1
-export CLOUDWATCH_A2A_ARN="<cloudwatch_a2a_runtime_arn>"
+export ACCOUNT_ID="<aws_account_id>"
+export CLOUDWATCH_RUNTIME_ID="<cloudwatch_a2a_runtime_id>"
 export CLOUDWATCH_LOG_GROUP="<cloudwatch_a2a_runtime_log_group>"
 export CLOUDWATCH_MCP_LOG_GROUP="<cloudwatch_mcp_runtime_log_group>"
 export ACCOUNT_NAME=default
@@ -91,6 +92,18 @@ aws logs describe-log-groups \
   --region "$REGION" \
   --log-group-name-prefix "/aws/bedrock-agentcore/runtimes/" \
   --query "logGroups[?contains(logGroupName, 'cloudwatch')].logGroupName" \
+  --output table
+```
+
+Validate the runtime ID before invoking. For AWS CLI direct tests, use runtime ID plus `--account-id` instead of the full ARN. The full ARN contains `runtime/<id>` and can fail through the CLI invocation path with a misleading default-qualifier error.
+
+```bash
+printf 'Runtime ID: %s\n' "$CLOUDWATCH_RUNTIME_ID"
+
+aws bedrock-agentcore-control get-agent-runtime \
+  --agent-runtime-id "$CLOUDWATCH_RUNTIME_ID" \
+  --region "$REGION" \
+  --query "{id:agentRuntimeId,name:agentRuntimeName,status:status,version:agentRuntimeVersion,arn:agentRuntimeArn}" \
   --output table
 ```
 
@@ -133,11 +146,11 @@ Invoke the runtime.
 
 ```bash
 aws bedrock-agentcore invoke-agent-runtime \
-  --agent-runtime-arn "$CLOUDWATCH_A2A_ARN" \
+  --agent-runtime-arn "$CLOUDWATCH_RUNTIME_ID" \
+  --account-id "$ACCOUNT_ID" \
   --runtime-session-id "$SESSION_ID" \
   --content-type application/json \
   --accept application/json \
-  --qualifier DEFAULT \
   --payload fileb:///tmp/cloudwatch-a2a-payload.json \
   --region "$REGION" \
   /tmp/cloudwatch-a2a-response.json
@@ -188,11 +201,11 @@ with open("/tmp/cloudwatch-a2a-payload.json", "w", encoding="utf-8") as f:
 PY
 
 aws bedrock-agentcore invoke-agent-runtime \
-  --agent-runtime-arn "$CLOUDWATCH_A2A_ARN" \
+  --agent-runtime-arn "$CLOUDWATCH_RUNTIME_ID" \
+  --account-id "$ACCOUNT_ID" \
   --runtime-session-id "$SESSION_ID" \
   --content-type application/json \
   --accept application/json \
-  --qualifier DEFAULT \
   --payload fileb:///tmp/cloudwatch-a2a-payload.json \
   --region "$REGION" \
   /tmp/cloudwatch-a2a-response.json
@@ -296,7 +309,7 @@ agentcore deploy --auto-update-on-conflict
 agentcore status
 ```
 
-After deployment, update `CLOUDWATCH_A2A_ARN` if AgentCore returns a new runtime ARN.
+After deployment, update `CLOUDWATCH_RUNTIME_ID` if AgentCore returns a new runtime ID.
 
 ## Phase 7 - Validation Matrix
 
