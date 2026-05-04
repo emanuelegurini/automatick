@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 MODEL = os.getenv('MODEL_ID', os.getenv('MODEL', 'us.amazon.nova-pro-v1:0'))
 MAX_TOKENS = int(os.getenv('MAX_TOKENS', '4096'))
+NOVA_TOOL_ADDITIONAL_REQUEST_FIELDS = {"inferenceConfig": {"topK": 1}}
+_NOVA_TOP_LEVEL_SCHEMA_KEYS = {"type", "properties", "required"}
 # Module-level context — set before each agent invocation
 _current_ctx = {"account_name": "", "region": "us-east-1"}
 
@@ -77,6 +79,34 @@ def _inject_context_into_tools(tools):
     logger.info(f"Patched {patched_count}/{len(tools)} tools with context injection")
 
 
+def _log_tool_specs_for_nova(tools):
+    """Log safe tool schema metadata before handing MCP tools to Nova."""
+    logger.info(f"Loaded {len(tools)} MCP tools for Nova tool use")
+    for tool in tools:
+        spec = getattr(tool, "tool_spec", {}) or {}
+        name = spec.get("name", "unknown")
+        schema = spec.get("inputSchema", {}).get("json", {})
+        if not isinstance(schema, dict):
+            logger.warning(f"Tool schema check: {name} has non-dict schema type={type(schema).__name__}")
+            continue
+
+        top_keys = sorted(schema.keys())
+        unsupported = sorted(k for k in top_keys if k not in _NOVA_TOP_LEVEL_SCHEMA_KEYS)
+        properties = schema.get("properties", {})
+        required = schema.get("required", [])
+        property_count = len(properties) if isinstance(properties, dict) else 0
+        required_count = len(required) if isinstance(required, list) else 0
+        message = (
+            f"Tool schema check: name={name}, type={schema.get('type')!r}, "
+            f"properties={property_count}, required={required_count}, "
+            f"top_keys={top_keys}, unsupported_top_keys={unsupported}"
+        )
+        if unsupported or schema.get("type") != "object":
+            logger.warning(message)
+        else:
+            logger.info(message)
+
+
 def _extract_metadata_prompt(original_prompt: str) -> str:
     """Extract metadata JSON prefix from prompt if present, set context, return clean prompt."""
     try:
@@ -122,11 +152,17 @@ def create_context_agent(name, description, system_prompt, mcp_client, max_token
     """
     tools = mcp_client.list_tools_sync()
     _inject_context_into_tools(tools)
+    _log_tool_specs_for_nova(tools)
 
     return Agent(
         name=name,
         description=description,
-        model=BedrockModel(model_id=MODEL, max_tokens=max_tokens or MAX_TOKENS),
+        model=BedrockModel(
+            model_id=MODEL,
+            max_tokens=max_tokens or MAX_TOKENS,
+            temperature=0,
+            additional_request_fields=NOVA_TOOL_ADDITIONAL_REQUEST_FIELDS,
+        ),
         tools=tools,
         system_prompt=system_prompt,
         callback_handler=None,
