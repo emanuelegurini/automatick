@@ -22,6 +22,11 @@ logger = logging.getLogger(__name__)
 MODEL = os.getenv('MODEL_ID', os.getenv('MODEL', 'us.amazon.nova-pro-v1:0'))
 MAX_TOKENS = int(os.getenv('MAX_TOKENS', '4096'))
 BEDROCK_STREAMING = os.getenv('BEDROCK_STREAMING', 'false').lower() in ('1', 'true', 'yes', 'on')
+CLOUDWATCH_TOOL_ALLOWLIST = {
+    name.strip()
+    for name in os.getenv('CLOUDWATCH_TOOL_ALLOWLIST', '').split(',')
+    if name.strip()
+}
 NOVA_TOOL_ADDITIONAL_REQUEST_FIELDS = {"inferenceConfig": {"topK": 1}}
 _NOVA_TOP_LEVEL_SCHEMA_KEYS = {"type", "properties", "required"}
 _NOVA_PROPERTY_SCHEMA_KEYS = {"type", "description", "enum", "items", "properties", "required"}
@@ -80,6 +85,25 @@ def _inject_context_into_tools(tools):
         tool.stream = _make_patched(original_stream, accepts_account, accepts_region)
 
     logger.info(f"Patched {patched_count}/{len(tools)} tools with context injection")
+
+
+def _filter_tools_for_nova(tools):
+    """Optionally expose a smaller MCP tool set to Nova for isolation tests."""
+    if not CLOUDWATCH_TOOL_ALLOWLIST:
+        return tools
+
+    filtered = [
+        tool for tool in tools
+        if (getattr(tool, "tool_spec", {}) or {}).get("name") in CLOUDWATCH_TOOL_ALLOWLIST
+    ]
+    logger.info(
+        f"Filtered CloudWatch tools for Nova: {len(filtered)}/{len(tools)} retained, "
+        f"allowlist={sorted(CLOUDWATCH_TOOL_ALLOWLIST)}"
+    )
+    if not filtered:
+        logger.warning("CloudWatch tool allowlist matched no tools; using full tool set")
+        return tools
+    return filtered
 
 
 def _flatten_schema_variant(schema):
@@ -276,6 +300,7 @@ def create_context_agent(name, description, system_prompt, mcp_client, max_token
         max_tokens: Maximum output tokens. Defaults to MAX_TOKENS env var (default 4096).
     """
     tools = mcp_client.list_tools_sync()
+    tools = _filter_tools_for_nova(tools)
     _inject_context_into_tools(tools)
     _sanitize_tool_specs_for_nova(tools)
     _log_tool_specs_for_nova(tools)
