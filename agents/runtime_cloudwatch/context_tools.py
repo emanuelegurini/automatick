@@ -13,7 +13,8 @@ Usage in specialist runtimes:
 import json
 import logging
 import os
-from strands import Agent
+import uuid
+from strands import Agent, tool
 from strands.models import BedrockModel
 from strands.multiagent.a2a import A2AServer
 
@@ -22,6 +23,9 @@ logger = logging.getLogger(__name__)
 MODEL = os.getenv('MODEL_ID', os.getenv('MODEL', 'us.amazon.nova-pro-v1:0'))
 MAX_TOKENS = int(os.getenv('MAX_TOKENS', '4096'))
 BEDROCK_STREAMING = os.getenv('BEDROCK_STREAMING', 'false').lower() in ('1', 'true', 'yes', 'on')
+CLOUDWATCH_USE_WRAPPER_TOOLS = os.getenv(
+    'CLOUDWATCH_USE_WRAPPER_TOOLS', 'true'
+).lower() in ('1', 'true', 'yes', 'on')
 CLOUDWATCH_TOOL_ALLOWLIST = {
     name.strip()
     for name in os.getenv('CLOUDWATCH_TOOL_ALLOWLIST', '').split(',')
@@ -104,6 +108,80 @@ def _filter_tools_for_nova(tools):
         logger.warning("CloudWatch tool allowlist matched no tools; using full tool set")
         return tools
     return filtered
+
+
+def _tool_result_to_text(result):
+    """Extract text content from a Strands ToolResult-like object."""
+    status = result.get("status") if isinstance(result, dict) else getattr(result, "status", "success")
+    content = result.get("content", []) if isinstance(result, dict) else getattr(result, "content", [])
+    parts = []
+    for item in content or []:
+        if isinstance(item, dict) and "text" in item:
+            parts.append(str(item["text"]))
+        elif hasattr(item, "text"):
+            parts.append(str(item.text))
+        else:
+            parts.append(str(item))
+
+    text = "\n".join(part for part in parts if part).strip()
+    if not text:
+        text = json.dumps(result, default=str)
+    if status == "error":
+        return f"MCP tool error: {text}"
+    return text
+
+
+def _create_nova_wrapper_tools(mcp_client, mcp_tools):
+    """Expose simple Strands-native tools to Nova and call MCP behind the scenes."""
+    tool_names = {
+        name for mcp_tool in mcp_tools
+        if isinstance((name := (getattr(mcp_tool, "tool_spec", {}) or {}).get("name")), str)
+    }
+    active_alarms_tool = "cloudwatch-mcp___get_active_alarms"
+    if active_alarms_tool not in tool_names:
+        logger.warning(
+            f"Nova wrapper requested {active_alarms_tool!r}, but available MCP tools are {sorted(tool_names)}"
+        )
+        return []
+
+    @tool(
+        name="get_active_alarms",
+        description=(
+            "Read-only CloudWatch tool. Lists active CloudWatch alarms in ALARM "
+            "or INSUFFICIENT_DATA state for the current account and region."
+        ),
+    )
+    def get_active_alarms(state_filter: str = "ALARM,INSUFFICIENT_DATA") -> str:
+        """List active CloudWatch alarms.
+
+        Args:
+            state_filter: Requested alarm states. Defaults to ALARM,INSUFFICIENT_DATA.
+        """
+        logger.info("Wrapper tool call intercepted: get_active_alarms")
+        logger.info(
+            "Wrapper invoking MCP tool %s with account_name=%r, region=%s, state_filter=%s",
+            active_alarms_tool,
+            _current_ctx["account_name"],
+            _current_ctx["region"],
+            state_filter,
+        )
+        result = mcp_client.call_tool_sync(
+            tool_use_id=f"cw-wrapper-{uuid.uuid4().hex}",
+            name=active_alarms_tool,
+            arguments={
+                "account_name": _current_ctx["account_name"],
+                "region": _current_ctx["region"],
+            },
+        )
+        return _tool_result_to_text(result)
+
+    wrapper_tools = [get_active_alarms]
+    logger.info(
+        "Using Nova wrapper tools: exposed=%s, backing_mcp_tools=%s",
+        [wrapped.tool_name for wrapped in wrapper_tools],
+        [active_alarms_tool],
+    )
+    return wrapper_tools
 
 
 def _flatten_schema_variant(schema):
@@ -299,14 +377,22 @@ def create_context_agent(name, description, system_prompt, mcp_client, max_token
         mcp_client: Connected MCPClient instance
         max_tokens: Maximum output tokens. Defaults to MAX_TOKENS env var (default 4096).
     """
-    tools = mcp_client.list_tools_sync()
-    tools = _filter_tools_for_nova(tools)
-    _inject_context_into_tools(tools)
+    mcp_tools = mcp_client.list_tools_sync()
+    if CLOUDWATCH_USE_WRAPPER_TOOLS:
+        tools = _create_nova_wrapper_tools(mcp_client, mcp_tools)
+        if not tools:
+            logger.warning("Nova wrapper tool creation failed; falling back to direct MCP tools")
+            tools = _filter_tools_for_nova(mcp_tools)
+            _inject_context_into_tools(tools)
+    else:
+        tools = _filter_tools_for_nova(mcp_tools)
+        _inject_context_into_tools(tools)
     _sanitize_tool_specs_for_nova(tools)
     _log_tool_specs_for_nova(tools)
     logger.info(
         f"Bedrock model configured: model={MODEL}, streaming={BEDROCK_STREAMING}, "
-        f"temperature=0, topK=1, max_tokens={max_tokens or MAX_TOKENS}"
+        f"temperature=0, topK=1, wrapper_tools={CLOUDWATCH_USE_WRAPPER_TOOLS}, "
+        f"max_tokens={max_tokens or MAX_TOKENS}"
     )
 
     return Agent(
