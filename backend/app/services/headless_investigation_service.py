@@ -209,30 +209,55 @@ def normalize_freshdesk_payload(payload: Dict[str, Any]) -> Incident:
     )
 
 
+_INVESTIGATION_SECTION_NAMES = (
+    "Root cause hypothesis",
+    "Evidence",
+    "Proposed fix",
+    "Proposed action",
+    "Risk / impact",
+    "Risk and impact",
+    "Approval required",
+)
+
+
+def _normalize_investigation_markdown(text: str) -> str:
+    normalized = re.sub(r"<thinking>.*?</thinking>\s*", "", text or "", flags=re.IGNORECASE | re.DOTALL)
+    for section in _INVESTIGATION_SECTION_NAMES:
+        normalized = re.sub(
+            rf"(?im)^\s*(?:#+\s*)?\*\*\s*{re.escape(section)}\s*\*\*\s*:?\s*$",
+            f"{section}\n",
+            normalized,
+        )
+    return normalized
+
+
 def _extract_markdown_section(text: str, section_name: str) -> str:
+    normalized_text = _normalize_investigation_markdown(text)
+    section_alternatives = "|".join(re.escape(section) for section in _INVESTIGATION_SECTION_NAMES)
     pattern = re.compile(
-        rf"(?:^|\n)\s*(?:#+\s*)?{re.escape(section_name)}\s*:?\s*\n?(.*?)(?=\n\s*(?:#+\s*)?(?:Root cause hypothesis|Evidence|Proposed fix|Proposed action|Risk / impact|Risk and impact|Approval required)\s*:?\s*\n|$)",
+        rf"(?:^|\n)\s*(?:#+\s*)?{re.escape(section_name)}\s*:?\s*\n?(.*?)(?=\n\s*(?:#+\s*)?(?:{section_alternatives})\s*:?\s*\n|$)",
         re.IGNORECASE | re.DOTALL,
     )
-    match = pattern.search(text or "")
+    match = pattern.search(normalized_text)
     return match.group(1).strip(" \n:-") if match else ""
 
 
 def structure_investigation_response(raw_response: str) -> Dict[str, Any]:
     """Extract standard investigation sections from the agent response."""
-    root_cause = _extract_markdown_section(raw_response, "Root cause hypothesis")
-    evidence = _extract_markdown_section(raw_response, "Evidence")
-    proposed_fix = _extract_markdown_section(raw_response, "Proposed fix") or _extract_markdown_section(raw_response, "Proposed action")
-    risk_impact = _extract_markdown_section(raw_response, "Risk / impact") or _extract_markdown_section(raw_response, "Risk and impact")
+    clean_response = _normalize_investigation_markdown(raw_response)
+    root_cause = _extract_markdown_section(clean_response, "Root cause hypothesis")
+    evidence = _extract_markdown_section(clean_response, "Evidence")
+    proposed_fix = _extract_markdown_section(clean_response, "Proposed fix") or _extract_markdown_section(clean_response, "Proposed action")
+    risk_impact = _extract_markdown_section(clean_response, "Risk / impact") or _extract_markdown_section(clean_response, "Risk and impact")
 
     return {
-        "summary": raw_response[:1000],
+        "summary": clean_response[:1000],
         "root_cause_hypothesis": root_cause or "The investigation did not return a separate root cause section.",
-        "evidence": evidence or raw_response,
+        "evidence": evidence or clean_response,
         "proposed_fix": proposed_fix or "Review the evidence and approve a manual remediation plan.",
         "risk_impact": risk_impact or "No AWS changes have been executed. Human approval is required before remediation.",
         "proposed_action": proposed_fix or "Manual review required",
-        "raw_response": raw_response,
+        "raw_response": clean_response,
     }
 
 

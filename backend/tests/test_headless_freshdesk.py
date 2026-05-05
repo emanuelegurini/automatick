@@ -139,6 +139,28 @@ class FreshdeskPayloadTests(unittest.TestCase):
 
 
 class FreshdeskNoteTests(unittest.TestCase):
+    def test_structures_bold_markdown_headings_and_strips_thinking(self):
+        structured = structure_investigation_response(
+            """<thinking>internal chain</thinking>
+**Root cause hypothesis**
+- ECS service is under-utilized.
+
+**Evidence**
+- CPUUtilization datapoints are below threshold.
+
+**Proposed fix**
+- Review target tracking policy.
+
+**Risk / impact**
+- No AWS changes executed.
+"""
+        )
+
+        self.assertEqual(structured["root_cause_hypothesis"], "ECS service is under-utilized.")
+        self.assertEqual(structured["evidence"], "CPUUtilization datapoints are below threshold.")
+        self.assertEqual(structured["proposed_fix"], "Review target tracking policy.")
+        self.assertNotIn("<thinking>", structured["summary"])
+
     def test_formats_private_note_with_required_sections(self):
         note = format_private_note(
             ticket_id="123",
