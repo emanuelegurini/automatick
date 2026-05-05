@@ -10,6 +10,7 @@ OWNER_TAG_VALUE="${OWNER_TAG_VALUE:-simone.ferraro}"
 
 PROJECT_TAG_ARGS=("Key=Project,Value=${PROJECT_TAG_VALUE}" "Key=owner,Value=${OWNER_TAG_VALUE}")
 PROJECT_TAG_MAP="Project=${PROJECT_TAG_VALUE},owner=${OWNER_TAG_VALUE}"
+ECS_TAG_ARGS=("key=Project,value=${PROJECT_TAG_VALUE}" "key=owner,value=${OWNER_TAG_VALUE}")
 
 log() {
   printf '%s\n' "$*"
@@ -93,37 +94,51 @@ tag_ec2_by_stack() {
   ids=$(aws ec2 describe-vpcs --region "$REGION" \
     --filters "Name=tag:aws:cloudformation:stack-name,Values=${stack_name}" \
     --query 'Vpcs[].VpcId' --output text 2>/dev/null || true)
-  [ -n "$ids" ] && aws ec2 create-tags --region "$REGION" --resources $ids --tags "${PROJECT_TAG_ARGS[@]}" >/dev/null && log "tagged: EC2 VPCs for $stack_name"
+  if [ -n "$ids" ]; then
+    aws ec2 create-tags --region "$REGION" --resources $ids --tags "${PROJECT_TAG_ARGS[@]}" >/dev/null && log "tagged: EC2 VPCs for $stack_name"
+  fi
 
   ids=$(aws ec2 describe-subnets --region "$REGION" \
     --filters "Name=tag:aws:cloudformation:stack-name,Values=${stack_name}" \
     --query 'Subnets[].SubnetId' --output text 2>/dev/null || true)
-  [ -n "$ids" ] && aws ec2 create-tags --region "$REGION" --resources $ids --tags "${PROJECT_TAG_ARGS[@]}" >/dev/null && log "tagged: EC2 subnets for $stack_name"
+  if [ -n "$ids" ]; then
+    aws ec2 create-tags --region "$REGION" --resources $ids --tags "${PROJECT_TAG_ARGS[@]}" >/dev/null && log "tagged: EC2 subnets for $stack_name"
+  fi
 
   ids=$(aws ec2 describe-route-tables --region "$REGION" \
     --filters "Name=tag:aws:cloudformation:stack-name,Values=${stack_name}" \
     --query 'RouteTables[].RouteTableId' --output text 2>/dev/null || true)
-  [ -n "$ids" ] && aws ec2 create-tags --region "$REGION" --resources $ids --tags "${PROJECT_TAG_ARGS[@]}" >/dev/null && log "tagged: EC2 route tables for $stack_name"
+  if [ -n "$ids" ]; then
+    aws ec2 create-tags --region "$REGION" --resources $ids --tags "${PROJECT_TAG_ARGS[@]}" >/dev/null && log "tagged: EC2 route tables for $stack_name"
+  fi
 
   ids=$(aws ec2 describe-internet-gateways --region "$REGION" \
     --filters "Name=tag:aws:cloudformation:stack-name,Values=${stack_name}" \
     --query 'InternetGateways[].InternetGatewayId' --output text 2>/dev/null || true)
-  [ -n "$ids" ] && aws ec2 create-tags --region "$REGION" --resources $ids --tags "${PROJECT_TAG_ARGS[@]}" >/dev/null && log "tagged: EC2 internet gateways for $stack_name"
+  if [ -n "$ids" ]; then
+    aws ec2 create-tags --region "$REGION" --resources $ids --tags "${PROJECT_TAG_ARGS[@]}" >/dev/null && log "tagged: EC2 internet gateways for $stack_name"
+  fi
 
   ids=$(aws ec2 describe-nat-gateways --region "$REGION" \
     --filter "Name=tag:aws:cloudformation:stack-name,Values=${stack_name}" \
     --query 'NatGateways[].NatGatewayId' --output text 2>/dev/null || true)
-  [ -n "$ids" ] && aws ec2 create-tags --region "$REGION" --resources $ids --tags "${PROJECT_TAG_ARGS[@]}" >/dev/null && log "tagged: EC2 NAT gateways for $stack_name"
+  if [ -n "$ids" ]; then
+    aws ec2 create-tags --region "$REGION" --resources $ids --tags "${PROJECT_TAG_ARGS[@]}" >/dev/null && log "tagged: EC2 NAT gateways for $stack_name"
+  fi
 
   ids=$(aws ec2 describe-security-groups --region "$REGION" \
     --filters "Name=tag:aws:cloudformation:stack-name,Values=${stack_name}" \
     --query 'SecurityGroups[].GroupId' --output text 2>/dev/null || true)
-  [ -n "$ids" ] && aws ec2 create-tags --region "$REGION" --resources $ids --tags "${PROJECT_TAG_ARGS[@]}" >/dev/null && log "tagged: EC2 security groups for $stack_name"
+  if [ -n "$ids" ]; then
+    aws ec2 create-tags --region "$REGION" --resources $ids --tags "${PROJECT_TAG_ARGS[@]}" >/dev/null && log "tagged: EC2 security groups for $stack_name"
+  fi
 
   ids=$(aws ec2 describe-network-acls --region "$REGION" \
     --filters "Name=tag:aws:cloudformation:stack-name,Values=${stack_name}" \
     --query 'NetworkAcls[].NetworkAclId' --output text 2>/dev/null || true)
-  [ -n "$ids" ] && aws ec2 create-tags --region "$REGION" --resources $ids --tags "${PROJECT_TAG_ARGS[@]}" >/dev/null && log "tagged: EC2 network ACLs for $stack_name"
+  if [ -n "$ids" ]; then
+    aws ec2 create-tags --region "$REGION" --resources $ids --tags "${PROJECT_TAG_ARGS[@]}" >/dev/null && log "tagged: EC2 network ACLs for $stack_name"
+  fi
 }
 
 require_cmd aws
@@ -184,17 +199,19 @@ log "Tagging ECS resources..."
 aws ecs list-clusters --region "$REGION" --output json 2>/dev/null | jq -r \
   '.clusterArns[] | select(test("MSPAssistantBackendStack"))' |
 while read -r cluster_arn; do
-  aws ecs tag-resource --region "$REGION" --resource-arn "$cluster_arn" --tags "${PROJECT_TAG_ARGS[@]}" >/dev/null 2>&1 && log "tagged: ECS cluster $cluster_arn"
+  aws ecs tag-resource --region "$REGION" --resource-arn "$cluster_arn" --tags "${ECS_TAG_ARGS[@]}" >/dev/null 2>&1 && \
+    log "tagged: ECS cluster $cluster_arn" || warn "could not tag ECS cluster: $cluster_arn"
   aws ecs list-services --region "$REGION" --cluster "$cluster_arn" --output json 2>/dev/null | jq -r '.serviceArns[]?' |
   while read -r service_arn; do
-    aws ecs tag-resource --region "$REGION" --resource-arn "$service_arn" --tags "${PROJECT_TAG_ARGS[@]}" >/dev/null 2>&1 && log "tagged: ECS service $service_arn"
+    aws ecs tag-resource --region "$REGION" --resource-arn "$service_arn" --tags "${ECS_TAG_ARGS[@]}" >/dev/null 2>&1 && \
+      log "tagged: ECS service $service_arn" || warn "could not tag ECS service: $service_arn"
   done
 done
 
 aws ecs list-task-definitions --region "$REGION" --family-prefix MSPAssistantBackendStack --status ACTIVE --output json 2>/dev/null | jq -r '.taskDefinitionArns[]?' |
 while read -r task_definition_arn; do
-  aws ecs tag-resource --region "$REGION" --resource-arn "$task_definition_arn" --tags "${PROJECT_TAG_ARGS[@]}" >/dev/null 2>&1 && \
-    log "tagged: ECS task definition $task_definition_arn" || true
+  aws ecs tag-resource --region "$REGION" --resource-arn "$task_definition_arn" --tags "${ECS_TAG_ARGS[@]}" >/dev/null 2>&1 && \
+    log "tagged: ECS task definition $task_definition_arn" || warn "could not tag ECS task definition: $task_definition_arn"
 done
 
 log "Tagging ALB and target groups..."
