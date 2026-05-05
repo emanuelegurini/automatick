@@ -19,6 +19,7 @@ from app.services.freshdesk_service import format_private_note
 from app.services.headless_investigation_service import (
     HeadlessInvestigationService,
     _build_agentcore_session_id,
+    _is_json_rpc_error,
     normalize_freshdesk_payload,
     structure_investigation_response,
 )
@@ -94,6 +95,10 @@ class FreshdeskPayloadTests(unittest.TestCase):
 
         self.assertGreaterEqual(len(session_id), 33)
         self.assertTrue(session_id.startswith("freshdesk-ticket-572358-"))
+
+    def test_json_rpc_error_response_is_detected(self):
+        self.assertTrue(_is_json_rpc_error('{"error":{"code":-32603,"message":"Internal error"},"jsonrpc":"2.0"}'))
+        self.assertFalse(_is_json_rpc_error("Root cause hypothesis\nNo active alarms."))
 
     def test_normalizes_explicit_payload(self):
         incident = normalize_freshdesk_payload(

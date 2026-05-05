@@ -176,6 +176,178 @@ def _call_aws_cli(mcp_client, aws_api_tool, cli_command):
     return _call_mcp_tool(mcp_client, aws_api_tool, arguments)
 
 
+def _limit_text(value, max_chars=8000):
+    text = str(value or "")
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + f"... [truncated {len(text) - max_chars} chars]"
+
+
+def _json_dumps(value):
+    return json.dumps(value, indent=2, default=str)
+
+
+def _extract_aws_api_json(raw_text):
+    """Extract the nested AWS CLI JSON payload from aws-api-mcp output."""
+    try:
+        parsed = json.loads(raw_text)
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+    response = parsed.get("response") if isinstance(parsed, dict) else None
+    if isinstance(response, dict):
+        nested_json = response.get("json")
+        if isinstance(nested_json, str) and nested_json.strip():
+            try:
+                return json.loads(nested_json)
+            except json.JSONDecodeError:
+                return None
+        return response
+
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _extract_state_reason_data(alarm):
+    data = alarm.get("StateReasonData")
+    if not isinstance(data, str) or not data.strip():
+        return {}
+    try:
+        parsed = json.loads(data)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _summarize_alarm_details(raw_text):
+    payload = _extract_aws_api_json(raw_text)
+    if not payload:
+        return _limit_text(raw_text)
+
+    alarms = payload.get("MetricAlarms") or []
+    if not alarms:
+        return _json_dumps({"metric_alarms": [], "message": "No matching CloudWatch alarm found."})
+
+    alarm = alarms[0]
+    reason_data = _extract_state_reason_data(alarm)
+    evaluated = reason_data.get("evaluatedDatapoints") or []
+    recent_datapoints = [
+        {
+            "timestamp": point.get("timestamp"),
+            "value": point.get("value"),
+            "sample_count": point.get("sampleCount"),
+        }
+        for point in evaluated[:10]
+        if isinstance(point, dict)
+    ]
+    if not recent_datapoints:
+        values = reason_data.get("recentDatapoints") or []
+        recent_datapoints = [{"value": value} for value in values[:10]]
+
+    summary = {
+        "alarm": {
+            "alarm_name": alarm.get("AlarmName"),
+            "state": alarm.get("StateValue"),
+            "state_updated_timestamp": alarm.get("StateUpdatedTimestamp"),
+            "state_reason": _limit_text(alarm.get("StateReason"), 900),
+            "namespace": alarm.get("Namespace"),
+            "metric_name": alarm.get("MetricName"),
+            "dimensions": alarm.get("Dimensions", [])[:10],
+            "threshold": alarm.get("Threshold"),
+            "comparison_operator": alarm.get("ComparisonOperator"),
+            "statistic": alarm.get("Statistic") or alarm.get("ExtendedStatistic"),
+            "period": alarm.get("Period"),
+            "evaluation_periods": alarm.get("EvaluationPeriods"),
+            "datapoints_to_alarm": alarm.get("DatapointsToAlarm"),
+            "recent_datapoints": recent_datapoints,
+        }
+    }
+    return _json_dumps(summary)
+
+
+def _summarize_metric_history(raw_text, statistic):
+    payload = _extract_aws_api_json(raw_text)
+    if not payload:
+        return _limit_text(raw_text)
+
+    datapoints = payload.get("Datapoints") or []
+    sorted_points = sorted(
+        [point for point in datapoints if isinstance(point, dict)],
+        key=lambda point: str(point.get("Timestamp", "")),
+        reverse=True,
+    )
+    compact_points = []
+    for point in sorted_points[:20]:
+        compact_points.append(
+            {
+                "timestamp": point.get("Timestamp"),
+                "value": point.get(statistic)
+                or point.get("Average")
+                or point.get("Maximum")
+                or point.get("Minimum")
+                or point.get("Sum")
+                or point.get("SampleCount"),
+                "unit": point.get("Unit"),
+            }
+        )
+
+    return _json_dumps(
+        {
+            "metric_history": {
+                "datapoint_count": len(datapoints),
+                "shown_datapoints": len(compact_points),
+                "statistic": statistic,
+                "datapoints": compact_points,
+            }
+        }
+    )
+
+
+def _summarize_log_groups(raw_text):
+    payload = _extract_aws_api_json(raw_text)
+    if not payload:
+        return _limit_text(raw_text)
+
+    groups = payload.get("logGroups") or []
+    return _json_dumps(
+        {
+            "log_groups": [
+                {
+                    "log_group_name": group.get("logGroupName"),
+                    "retention_in_days": group.get("retentionInDays"),
+                    "stored_bytes": group.get("storedBytes"),
+                }
+                for group in groups[:20]
+                if isinstance(group, dict)
+            ],
+            "shown": min(len(groups), 20),
+            "has_more": len(groups) > 20,
+        }
+    )
+
+
+def _summarize_log_events(raw_text):
+    payload = _extract_aws_api_json(raw_text)
+    if not payload:
+        return _limit_text(raw_text)
+
+    events = payload.get("events") or []
+    return _json_dumps(
+        {
+            "log_events": [
+                {
+                    "timestamp": event.get("timestamp"),
+                    "log_stream_name": event.get("logStreamName"),
+                    "message": _limit_text(event.get("message"), 500),
+                }
+                for event in events[:20]
+                if isinstance(event, dict)
+            ],
+            "shown": min(len(events), 20),
+            "has_more": len(events) > 20,
+        }
+    )
+
+
 def _quote_cli_value(value):
     return shlex.quote(str(value or ""))
 
@@ -293,7 +465,8 @@ def _create_nova_wrapper_tools(mcp_client, mcp_tools):
             f"--alarm-names {_quote_cli_value(alarm_name)} "
             "--output json"
         )
-        return _call_aws_cli(mcp_client, aws_api_tool, command)
+        raw_result = _call_aws_cli(mcp_client, aws_api_tool, command)
+        return _summarize_alarm_details(raw_result)
 
     @tool(
         name="get_metric_history",
@@ -348,7 +521,8 @@ def _create_nova_wrapper_tools(mcp_client, mcp_tools):
             f"{dimensions_clause} "
             "--output json"
         )
-        return _call_aws_cli(mcp_client, aws_api_tool, command)
+        raw_result = _call_aws_cli(mcp_client, aws_api_tool, command)
+        return _summarize_metric_history(raw_result, selected_statistic)
 
     @tool(
         name="list_log_groups",
@@ -375,7 +549,8 @@ def _create_nova_wrapper_tools(mcp_client, mcp_tools):
             f"{prefix_clause}"
             f"--limit {bounded_limit} --output json"
         )
-        return _call_aws_cli(mcp_client, aws_api_tool, command)
+        raw_result = _call_aws_cli(mcp_client, aws_api_tool, command)
+        return _summarize_log_groups(raw_result)
 
     @tool(
         name="search_log_events",
@@ -419,7 +594,8 @@ def _create_nova_wrapper_tools(mcp_client, mcp_tools):
             f"--start-time {start_millis} "
             f"--limit {bounded_limit} --output json"
         )
-        return _call_aws_cli(mcp_client, aws_api_tool, command)
+        raw_result = _call_aws_cli(mcp_client, aws_api_tool, command)
+        return _summarize_log_events(raw_result)
 
     wrapper_tools = [
         get_active_alarms,

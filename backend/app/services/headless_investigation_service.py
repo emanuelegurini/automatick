@@ -7,6 +7,7 @@ pending remediation record. It intentionally never executes AWS write actions.
 """
 
 import logging
+import json
 import os
 import re
 import time
@@ -104,6 +105,14 @@ def _build_agentcore_session_id(ticket_id: str) -> str:
     safe_ticket_id = _SESSION_ID_UNSAFE_CHARS.sub("-", str(ticket_id or "ticket")).strip("-_")
     safe_ticket_id = safe_ticket_id[:64] or "ticket"
     return f"freshdesk-ticket-{safe_ticket_id}-{uuid.uuid4().hex}"
+
+
+def _is_json_rpc_error(raw_response: str) -> bool:
+    try:
+        parsed = json.loads(raw_response)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    return isinstance(parsed, dict) and bool(parsed.get("error"))
 
 
 def _extract_resource_id(*texts: Any) -> Optional[str]:
@@ -445,6 +454,8 @@ The proposed action must be a human-readable remediation proposal only. It must 
         raw_response = result.get("response", "") if isinstance(result, dict) else str(result)
         if not raw_response:
             raise RuntimeError("AgentCore returned an empty investigation response")
+        if _is_json_rpc_error(raw_response):
+            raise RuntimeError("AgentCore investigation returned a JSON-RPC error")
 
         structured = structure_investigation_response(raw_response)
         structured["agent_type"] = result.get("agent_type", "cloudwatch") if isinstance(result, dict) else "unknown"

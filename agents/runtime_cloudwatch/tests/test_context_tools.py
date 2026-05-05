@@ -75,8 +75,9 @@ class FakeMCPTool:
 
 
 class FakeMCPClient:
-    def __init__(self):
+    def __init__(self, result_text=None):
         self.calls = []
+        self.result_text = result_text
 
     def call_tool_sync(self, tool_use_id, name, arguments):
         self.calls.append(
@@ -90,7 +91,8 @@ class FakeMCPClient:
             "status": "success",
             "content": [
                 {
-                    "text": json.dumps(
+                    "text": self.result_text
+                    or json.dumps(
                         {
                             "called": name,
                             "arguments": arguments,
@@ -204,6 +206,76 @@ class CloudWatchNovaWrapperTests(unittest.TestCase):
 
         self.assertIn("log_group_name is required", result)
         self.assertEqual(self.client.calls, [])
+
+    def test_alarm_details_returns_compact_summary_not_raw_alarm_payload(self):
+        raw_alarm_payload = {
+            "response": {
+                "json": json.dumps(
+                    {
+                        "MetricAlarms": [
+                            {
+                                "AlarmName": "cpu-alarm",
+                                "AlarmArn": "arn:aws:cloudwatch:us-east-1:123:alarm:cpu-alarm",
+                                "StateValue": "ALARM",
+                                "StateReason": "Threshold Crossed",
+                                "StateReasonData": json.dumps(
+                                    {
+                                        "evaluatedDatapoints": [
+                                            {
+                                                "timestamp": "2026-05-05T10:00:00.000+0000",
+                                                "value": 91.2,
+                                                "sampleCount": 1.0,
+                                            }
+                                        ]
+                                    }
+                                ),
+                                "Namespace": "AWS/EC2",
+                                "MetricName": "CPUUtilization",
+                                "Dimensions": [{"Name": "InstanceId", "Value": "i-abc"}],
+                                "Threshold": 80.0,
+                                "ComparisonOperator": "GreaterThanThreshold",
+                                "Period": 60,
+                                "EvaluationPeriods": 3,
+                            }
+                        ]
+                    }
+                )
+            }
+        }
+        self.client = FakeMCPClient(result_text=json.dumps(raw_alarm_payload))
+        wrappers = self._create_wrappers(["aws-api-mcp___call_aws"])
+
+        result = wrappers["get_alarm_details"]("cpu-alarm")
+
+        self.assertIn('"alarm_name": "cpu-alarm"', result)
+        self.assertIn('"recent_datapoints"', result)
+        self.assertNotIn("AlarmArn", result)
+
+    def test_metric_history_returns_compact_datapoints(self):
+        raw_metric_payload = {
+            "response": {
+                "json": json.dumps(
+                    {
+                        "Datapoints": [
+                            {
+                                "Timestamp": "2026-05-05T10:00:00+00:00",
+                                "Average": 10.5,
+                                "Unit": "Percent",
+                            }
+                        ],
+                        "Label": "CPUUtilization",
+                    }
+                )
+            }
+        }
+        self.client = FakeMCPClient(result_text=json.dumps(raw_metric_payload))
+        wrappers = self._create_wrappers(["aws-api-mcp___call_aws"])
+
+        result = wrappers["get_metric_history"]("AWS/EC2", "CPUUtilization")
+
+        self.assertIn('"metric_history"', result)
+        self.assertIn('"datapoint_count": 1', result)
+        self.assertIn('"value": 10.5', result)
 
 
 if __name__ == "__main__":
