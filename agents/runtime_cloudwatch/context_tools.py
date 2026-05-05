@@ -218,6 +218,77 @@ def _extract_state_reason_data(alarm):
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _coerce_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _datapoint_stats(datapoints):
+    values = [
+        coerced
+        for datapoint in datapoints or []
+        if isinstance(datapoint, dict)
+        for coerced in [_coerce_float(datapoint.get("value"))]
+        if coerced is not None
+    ]
+    if not values:
+        return {}
+
+    return {
+        "count": len(values),
+        "latest": values[0],
+        "minimum": min(values),
+        "maximum": max(values),
+        "average": round(sum(values) / len(values), 4),
+    }
+
+
+def _first_present_value(mapping, keys):
+    for key in keys:
+        if key in mapping and mapping[key] is not None:
+            return mapping[key]
+    return None
+
+
+def _interpret_alarm(alarm, recent_datapoints):
+    alarm_name = str(alarm.get("AlarmName") or "")
+    namespace = str(alarm.get("Namespace") or "")
+    metric_name = str(alarm.get("MetricName") or "")
+    comparison = str(alarm.get("ComparisonOperator") or "")
+    threshold = alarm.get("Threshold")
+    stats = _datapoint_stats(recent_datapoints)
+
+    is_ecs_target_tracking_low = (
+        namespace == "AWS/ECS"
+        and metric_name == "CPUUtilization"
+        and "TargetTracking-" in alarm_name
+        and "-AlarmLow-" in alarm_name
+        and comparison == "LessThanThreshold"
+    )
+    if is_ecs_target_tracking_low:
+        return {
+            "classification": "ecs_target_tracking_low_utilization",
+            "recommended_framing": (
+                "Treat this as an ECS target tracking scale-in/low-utilization signal, "
+                "not as an application outage by itself."
+            ),
+            "evidence_hint": (
+                f"Recent CPU datapoints are below the target threshold {threshold}."
+                if threshold is not None
+                else "Recent CPU datapoints are below the target tracking lower bound."
+            ),
+            "metric_stats": stats,
+        }
+
+    return {
+        "classification": "cloudwatch_alarm",
+        "recommended_framing": "Investigate the alarm against metric trend, resource health, and logs.",
+        "metric_stats": stats,
+    }
+
+
 def _summarize_alarm_details(raw_text):
     payload = _extract_aws_api_json(raw_text)
     if not payload:
@@ -261,6 +332,7 @@ def _summarize_alarm_details(raw_text):
             "recent_datapoints": recent_datapoints,
         }
     }
+    summary["alarm_interpretation"] = _interpret_alarm(alarm, recent_datapoints)
     return _json_dumps(summary)
 
 
@@ -277,15 +349,14 @@ def _summarize_metric_history(raw_text, statistic):
     )
     compact_points = []
     for point in sorted_points[:20]:
+        value = _first_present_value(
+            point,
+            [statistic, "Average", "Maximum", "Minimum", "Sum", "SampleCount"],
+        )
         compact_points.append(
             {
                 "timestamp": point.get("Timestamp"),
-                "value": point.get(statistic)
-                or point.get("Average")
-                or point.get("Maximum")
-                or point.get("Minimum")
-                or point.get("Sum")
-                or point.get("SampleCount"),
+                "value": value,
                 "unit": point.get("Unit"),
             }
         )
@@ -296,6 +367,7 @@ def _summarize_metric_history(raw_text, statistic):
                 "datapoint_count": len(datapoints),
                 "shown_datapoints": len(compact_points),
                 "statistic": statistic,
+                "stats": _datapoint_stats(compact_points),
                 "datapoints": compact_points,
             }
         }

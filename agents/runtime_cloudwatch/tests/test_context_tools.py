@@ -251,6 +251,53 @@ class CloudWatchNovaWrapperTests(unittest.TestCase):
         self.assertIn('"recent_datapoints"', result)
         self.assertNotIn("AlarmArn", result)
 
+    def test_ecs_target_tracking_alarm_low_gets_specific_interpretation(self):
+        raw_alarm_payload = {
+            "response": {
+                "json": json.dumps(
+                    {
+                        "MetricAlarms": [
+                            {
+                                "AlarmName": "TargetTracking-service/cluster/service-AlarmLow-abc",
+                                "StateValue": "ALARM",
+                                "StateReasonData": json.dumps(
+                                    {
+                                        "evaluatedDatapoints": [
+                                            {
+                                                "timestamp": "2026-05-05T10:00:00.000+0000",
+                                                "value": 0.3,
+                                            },
+                                            {
+                                                "timestamp": "2026-05-05T09:59:00.000+0000",
+                                                "value": 1.7,
+                                            },
+                                        ]
+                                    }
+                                ),
+                                "Namespace": "AWS/ECS",
+                                "MetricName": "CPUUtilization",
+                                "Dimensions": [
+                                    {"Name": "ClusterName", "Value": "cluster"},
+                                    {"Name": "ServiceName", "Value": "service"},
+                                ],
+                                "Threshold": 63.0,
+                                "ComparisonOperator": "LessThanThreshold",
+                            }
+                        ]
+                    }
+                )
+            }
+        }
+        self.client = FakeMCPClient(result_text=json.dumps(raw_alarm_payload))
+        wrappers = self._create_wrappers(["aws-api-mcp___call_aws"])
+
+        result = wrappers["get_alarm_details"]("TargetTracking-service/cluster/service-AlarmLow-abc")
+
+        self.assertIn('"classification": "ecs_target_tracking_low_utilization"', result)
+        self.assertIn("scale-in/low-utilization signal", result)
+        self.assertIn('"latest": 0.3', result)
+        self.assertIn('"maximum": 1.7', result)
+
     def test_metric_history_returns_compact_datapoints(self):
         raw_metric_payload = {
             "response": {
@@ -276,6 +323,61 @@ class CloudWatchNovaWrapperTests(unittest.TestCase):
         self.assertIn('"metric_history"', result)
         self.assertIn('"datapoint_count": 1', result)
         self.assertIn('"value": 10.5', result)
+
+    def test_metric_history_includes_compact_statistics(self):
+        raw_metric_payload = {
+            "response": {
+                "json": json.dumps(
+                    {
+                        "Datapoints": [
+                            {
+                                "Timestamp": "2026-05-05T10:00:00+00:00",
+                                "Average": 2.0,
+                                "Unit": "Percent",
+                            },
+                            {
+                                "Timestamp": "2026-05-05T10:01:00+00:00",
+                                "Average": 4.0,
+                                "Unit": "Percent",
+                            },
+                        ]
+                    }
+                )
+            }
+        }
+        self.client = FakeMCPClient(result_text=json.dumps(raw_metric_payload))
+        wrappers = self._create_wrappers(["aws-api-mcp___call_aws"])
+
+        result = wrappers["get_metric_history"]("AWS/ECS", "CPUUtilization")
+
+        self.assertIn('"stats"', result)
+        self.assertIn('"latest": 4.0', result)
+        self.assertIn('"minimum": 2.0', result)
+        self.assertIn('"average": 3.0', result)
+
+    def test_metric_history_preserves_zero_values(self):
+        raw_metric_payload = {
+            "response": {
+                "json": json.dumps(
+                    {
+                        "Datapoints": [
+                            {
+                                "Timestamp": "2026-05-05T10:00:00+00:00",
+                                "Average": 0.0,
+                                "Unit": "Percent",
+                            }
+                        ]
+                    }
+                )
+            }
+        }
+        self.client = FakeMCPClient(result_text=json.dumps(raw_metric_payload))
+        wrappers = self._create_wrappers(["aws-api-mcp___call_aws"])
+
+        result = wrappers["get_metric_history"]("AWS/ECS", "CPUUtilization")
+
+        self.assertIn('"value": 0.0', result)
+        self.assertIn('"latest": 0.0', result)
 
 
 if __name__ == "__main__":
