@@ -43,6 +43,7 @@ _RESOURCE_ID_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _REGION_PATTERN = re.compile(r"\b([a-z]{2}-[a-z]+-\d)\b")
+_SESSION_ID_UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9_-]")
 
 
 @dataclass
@@ -97,6 +98,12 @@ def _sanitize_account_name(value: Any) -> str:
     raw = str(value or "default").strip().lower().replace("-", "_").replace(" ", "_")
     sanitized = _ACCOUNT_NAME_UNSAFE_CHARS.sub("", raw)
     return sanitized or "default"
+
+
+def _build_agentcore_session_id(ticket_id: str) -> str:
+    safe_ticket_id = _SESSION_ID_UNSAFE_CHARS.sub("-", str(ticket_id or "ticket")).strip("-_")
+    safe_ticket_id = safe_ticket_id[:64] or "ticket"
+    return f"freshdesk-ticket-{safe_ticket_id}-{uuid.uuid4().hex}"
 
 
 def _extract_resource_id(*texts: Any) -> Optional[str]:
@@ -395,7 +402,7 @@ The proposed action must be a human-readable remediation proposal only. It must 
         from app.core.direct_router import get_direct_router
 
         prompt = self.build_investigation_prompt(incident)
-        session_id = f"freshdesk-{incident.ticket_id}-{uuid.uuid4().hex[:8]}"
+        session_id = _build_agentcore_session_id(incident.ticket_id)
         direct_router = get_direct_router()
 
         result = None
@@ -431,6 +438,9 @@ The proposed action must be a human-readable remediation proposal only. It must 
 
         if result is None:
             raise RuntimeError("AgentCore investigation runtime is not configured")
+
+        if isinstance(result, dict) and result.get("success") is False:
+            raise RuntimeError("AgentCore investigation failed")
 
         raw_response = result.get("response", "") if isinstance(result, dict) else str(result)
         if not raw_response:

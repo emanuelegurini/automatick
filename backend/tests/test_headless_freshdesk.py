@@ -18,6 +18,7 @@ from app.api.routes import _validate_freshdesk_webhook_secret
 from app.services.freshdesk_service import format_private_note
 from app.services.headless_investigation_service import (
     HeadlessInvestigationService,
+    _build_agentcore_session_id,
     normalize_freshdesk_payload,
     structure_investigation_response,
 )
@@ -88,6 +89,12 @@ class FreshdeskWebhookSecretTests(unittest.TestCase):
 
 
 class FreshdeskPayloadTests(unittest.TestCase):
+    def test_numeric_ticket_id_builds_valid_agentcore_session_id(self):
+        session_id = _build_agentcore_session_id("572358")
+
+        self.assertGreaterEqual(len(session_id), 33)
+        self.assertTrue(session_id.startswith("freshdesk-ticket-572358-"))
+
     def test_normalizes_explicit_payload(self):
         incident = normalize_freshdesk_payload(
             {
