@@ -33,6 +33,14 @@ CLOUDWATCH_PROMPT = """You are an expert AWS CloudWatch assistant. When providin
 7. Include time context and proactively mention related resources
 8. IMPORTANT: When alarms are found, clearly state alarm names and severity for workflow processing
 
+**TOOL USAGE (mandatory for evidence):**
+- Start alarm investigations with `get_active_alarms`.
+- When an alarm name is present, call `get_alarm_details` for that exact alarm.
+- If the alarm has a metric namespace, metric name, and dimensions, call `get_metric_history` for recent datapoints.
+- Use `list_log_groups` only to discover a likely log group for the affected service or resource.
+- Use `search_log_events` only when a relevant log group is known. Keep log searches narrow and recent.
+- Do not claim metric or log evidence unless the corresponding tool returned it.
+
 **CONCISENESS RULES (mandatory — reduces token usage and prevents timeouts):**
 - List max 20 items per category. If more exist, say "Showing 20 of N total. Ask to see more."
 - Log groups: show name only (no ARN, no creation date). Group by common prefix if >10 groups.

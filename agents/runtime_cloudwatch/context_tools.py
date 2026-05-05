@@ -13,7 +13,9 @@ Usage in specialist runtimes:
 import json
 import logging
 import os
+import shlex
 import uuid
+from datetime import datetime, timedelta, timezone
 from strands import Agent, tool
 from strands.models import BedrockModel
 from strands.multiagent.a2a import A2AServer
@@ -131,6 +133,94 @@ def _tool_result_to_text(result):
     return text
 
 
+def _clamp_int(value, default, minimum, maximum):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def _safe_region():
+    return _current_ctx.get("region") or "us-east-1"
+
+
+def _base_mcp_arguments():
+    return {
+        "account_name": _current_ctx.get("account_name", ""),
+        "region": _safe_region(),
+    }
+
+
+def _call_mcp_tool(mcp_client, tool_name, arguments):
+    logger.info(
+        "Wrapper invoking MCP tool %s with arguments=%s",
+        tool_name,
+        json.dumps(arguments, default=str),
+    )
+    result = mcp_client.call_tool_sync(
+        tool_use_id=f"cw-wrapper-{uuid.uuid4().hex}",
+        name=tool_name,
+        arguments=arguments,
+    )
+    return _tool_result_to_text(result)
+
+
+def _call_aws_cli(mcp_client, aws_api_tool, cli_command):
+    if not aws_api_tool:
+        return "MCP tool error: aws-api-mcp___call_aws is not available for CloudWatch evidence lookup."
+    arguments = {
+        **_base_mcp_arguments(),
+        "cli_command": cli_command,
+    }
+    return _call_mcp_tool(mcp_client, aws_api_tool, arguments)
+
+
+def _quote_cli_value(value):
+    return shlex.quote(str(value or ""))
+
+
+def _parse_dimensions(dimensions_json):
+    if not dimensions_json:
+        return []
+    try:
+        parsed = json.loads(dimensions_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"dimensions_json must be a JSON array of objects: {exc}") from exc
+
+    if not isinstance(parsed, list):
+        raise ValueError("dimensions_json must be a JSON array")
+
+    dimensions = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            raise ValueError("Each metric dimension must be an object")
+        name = str(item.get("Name") or item.get("name") or "").strip()
+        value = str(item.get("Value") or item.get("value") or "").strip()
+        if not name or not value:
+            raise ValueError("Each metric dimension must include Name and Value")
+        dimensions.append({"Name": name, "Value": value})
+    return dimensions[:10]
+
+
+def _metric_dimensions_cli(dimensions_json):
+    dimensions = _parse_dimensions(dimensions_json)
+    if not dimensions:
+        return ""
+    parts = [
+        _quote_cli_value(f"Name={dimension['Name']},Value={dimension['Value']}")
+        for dimension in dimensions
+    ]
+    return " --dimensions " + " ".join(parts)
+
+
+def _utc_window(minutes):
+    bounded_minutes = _clamp_int(minutes, default=60, minimum=5, maximum=1440)
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(minutes=bounded_minutes)
+    return start.isoformat(), end.isoformat(), bounded_minutes
+
+
 def _create_nova_wrapper_tools(mcp_client, mcp_tools):
     """Expose simple Strands-native tools to Nova and call MCP behind the scenes."""
     tool_names = {
@@ -138,9 +228,13 @@ def _create_nova_wrapper_tools(mcp_client, mcp_tools):
         if isinstance((name := (getattr(mcp_tool, "tool_spec", {}) or {}).get("name")), str)
     }
     active_alarms_tool = "cloudwatch-mcp___get_active_alarms"
-    if active_alarms_tool not in tool_names:
+    aws_api_tool = "aws-api-mcp___call_aws" if "aws-api-mcp___call_aws" in tool_names else ""
+    if active_alarms_tool not in tool_names and not aws_api_tool:
         logger.warning(
-            f"Nova wrapper requested {active_alarms_tool!r}, but available MCP tools are {sorted(tool_names)}"
+            "Nova wrapper requires either %r or %r, but available MCP tools are %s",
+            active_alarms_tool,
+            "aws-api-mcp___call_aws",
+            sorted(tool_names),
         )
         return []
 
@@ -158,28 +252,186 @@ def _create_nova_wrapper_tools(mcp_client, mcp_tools):
             state_filter: Requested alarm states. Defaults to ALARM,INSUFFICIENT_DATA.
         """
         logger.info("Wrapper tool call intercepted: get_active_alarms")
-        logger.info(
-            "Wrapper invoking MCP tool %s with account_name=%r, region=%s, state_filter=%s",
-            active_alarms_tool,
-            _current_ctx["account_name"],
-            _current_ctx["region"],
-            state_filter,
-        )
-        result = mcp_client.call_tool_sync(
-            tool_use_id=f"cw-wrapper-{uuid.uuid4().hex}",
-            name=active_alarms_tool,
-            arguments={
-                "account_name": _current_ctx["account_name"],
-                "region": _current_ctx["region"],
-            },
-        )
-        return _tool_result_to_text(result)
+        if active_alarms_tool in tool_names:
+            return _call_mcp_tool(mcp_client, active_alarms_tool, _base_mcp_arguments())
 
-    wrapper_tools = [get_active_alarms]
+        requested_states = [
+            state.strip().upper()
+            for state in str(state_filter or "ALARM,INSUFFICIENT_DATA").split(",")
+            if state.strip()
+        ]
+        states = [state for state in requested_states if state in {"ALARM", "INSUFFICIENT_DATA", "OK"}]
+        states = states or ["ALARM", "INSUFFICIENT_DATA"]
+        sections = []
+        for state in states[:3]:
+            command = (
+                "aws cloudwatch describe-alarms "
+                f"--state-value {_quote_cli_value(state)} "
+                "--max-records 20 --output json"
+            )
+            sections.append(f"## {state}\n{_call_aws_cli(mcp_client, aws_api_tool, command)}")
+        return "\n\n".join(sections)
+
+    @tool(
+        name="get_alarm_details",
+        description=(
+            "Read-only CloudWatch tool. Fetches full configuration and current state "
+            "for one CloudWatch alarm by name."
+        ),
+    )
+    def get_alarm_details(alarm_name: str) -> str:
+        """Get one alarm's details.
+
+        Args:
+            alarm_name: Exact CloudWatch alarm name.
+        """
+        logger.info("Wrapper tool call intercepted: get_alarm_details")
+        if not str(alarm_name or "").strip():
+            return "MCP tool error: alarm_name is required."
+        command = (
+            "aws cloudwatch describe-alarms "
+            f"--alarm-names {_quote_cli_value(alarm_name)} "
+            "--output json"
+        )
+        return _call_aws_cli(mcp_client, aws_api_tool, command)
+
+    @tool(
+        name="get_metric_history",
+        description=(
+            "Read-only CloudWatch tool. Retrieves recent datapoints for one metric. "
+            "Pass dimensions_json as a JSON array such as "
+            "[{\"Name\":\"InstanceId\",\"Value\":\"i-abc\"}]."
+        ),
+    )
+    def get_metric_history(
+        namespace: str,
+        metric_name: str,
+        dimensions_json: str = "[]",
+        minutes: int = 60,
+        period_seconds: int = 60,
+        statistic: str = "Average",
+    ) -> str:
+        """Get recent metric datapoints.
+
+        Args:
+            namespace: CloudWatch namespace, for example AWS/EC2.
+            metric_name: Metric name, for example CPUUtilization.
+            dimensions_json: JSON array of dimension objects with Name and Value.
+            minutes: Lookback window in minutes, clamped to 5..1440.
+            period_seconds: CloudWatch period, clamped to 60..3600.
+            statistic: Statistic such as Average, Maximum, Minimum, Sum, SampleCount.
+        """
+        logger.info("Wrapper tool call intercepted: get_metric_history")
+        if not str(namespace or "").strip() or not str(metric_name or "").strip():
+            return "MCP tool error: namespace and metric_name are required."
+
+        allowed_statistics = {"Average", "Maximum", "Minimum", "Sum", "SampleCount"}
+        selected_statistic = str(statistic or "Average").strip()
+        if selected_statistic not in allowed_statistics:
+            selected_statistic = "Average"
+
+        try:
+            dimensions_clause = _metric_dimensions_cli(dimensions_json)
+        except ValueError as exc:
+            return f"MCP tool error: {exc}"
+
+        start_time, end_time, _ = _utc_window(minutes)
+        period = _clamp_int(period_seconds, default=60, minimum=60, maximum=3600)
+        command = (
+            "aws cloudwatch get-metric-statistics "
+            f"--namespace {_quote_cli_value(namespace)} "
+            f"--metric-name {_quote_cli_value(metric_name)} "
+            f"--start-time {_quote_cli_value(start_time)} "
+            f"--end-time {_quote_cli_value(end_time)} "
+            f"--period {period} "
+            f"--statistics {_quote_cli_value(selected_statistic)}"
+            f"{dimensions_clause} "
+            "--output json"
+        )
+        return _call_aws_cli(mcp_client, aws_api_tool, command)
+
+    @tool(
+        name="list_log_groups",
+        description=(
+            "Read-only CloudWatch Logs tool. Lists log groups, optionally filtered by prefix."
+        ),
+    )
+    def list_log_groups(prefix: str = "", limit: int = 20) -> str:
+        """List CloudWatch log groups.
+
+        Args:
+            prefix: Optional log group name prefix.
+            limit: Maximum groups to return, clamped to 1..50.
+        """
+        logger.info("Wrapper tool call intercepted: list_log_groups")
+        bounded_limit = _clamp_int(limit, default=20, minimum=1, maximum=50)
+        prefix_clause = (
+            f"--log-group-name-prefix {_quote_cli_value(prefix)} "
+            if str(prefix or "").strip()
+            else ""
+        )
+        command = (
+            "aws logs describe-log-groups "
+            f"{prefix_clause}"
+            f"--limit {bounded_limit} --output json"
+        )
+        return _call_aws_cli(mcp_client, aws_api_tool, command)
+
+    @tool(
+        name="search_log_events",
+        description=(
+            "Read-only CloudWatch Logs tool. Searches recent events in one log group. "
+            "Use only when the ticket or alarm identifies a relevant log group."
+        ),
+    )
+    def search_log_events(
+        log_group_name: str,
+        filter_pattern: str = "",
+        minutes: int = 60,
+        limit: int = 20,
+    ) -> str:
+        """Search recent CloudWatch Logs events.
+
+        Args:
+            log_group_name: Exact CloudWatch log group name.
+            filter_pattern: Optional CloudWatch Logs filter pattern.
+            minutes: Lookback window in minutes, clamped to 5..1440.
+            limit: Maximum events to return, clamped to 1..50.
+        """
+        logger.info("Wrapper tool call intercepted: search_log_events")
+        if not str(log_group_name or "").strip():
+            return "MCP tool error: log_group_name is required."
+
+        start = datetime.now(timezone.utc) - timedelta(
+            minutes=_clamp_int(minutes, default=60, minimum=5, maximum=1440)
+        )
+        start_millis = int(start.timestamp() * 1000)
+        bounded_limit = _clamp_int(limit, default=20, minimum=1, maximum=50)
+        filter_clause = (
+            f"--filter-pattern {_quote_cli_value(filter_pattern)} "
+            if str(filter_pattern or "").strip()
+            else ""
+        )
+        command = (
+            "aws logs filter-log-events "
+            f"--log-group-name {_quote_cli_value(log_group_name)} "
+            f"{filter_clause}"
+            f"--start-time {start_millis} "
+            f"--limit {bounded_limit} --output json"
+        )
+        return _call_aws_cli(mcp_client, aws_api_tool, command)
+
+    wrapper_tools = [
+        get_active_alarms,
+        get_alarm_details,
+        get_metric_history,
+        list_log_groups,
+        search_log_events,
+    ]
     logger.info(
         "Using Nova wrapper tools: exposed=%s, backing_mcp_tools=%s",
         [wrapped.tool_name for wrapped in wrapper_tools],
-        [active_alarms_tool],
+        sorted(name for name in [active_alarms_tool, aws_api_tool] if name),
     )
     return wrapper_tools
 

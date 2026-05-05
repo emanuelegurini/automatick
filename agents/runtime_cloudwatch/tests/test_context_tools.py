@@ -1,0 +1,210 @@
+import importlib.util
+import json
+import sys
+import types
+import unittest
+from pathlib import Path
+
+
+def _install_fake_strands_modules():
+    strands = types.ModuleType("strands")
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    def fake_tool(name=None, description=""):
+        def decorator(func):
+            tool_name = name or func.__name__
+            func.tool_name = tool_name
+            func.tool_spec = {
+                "name": tool_name,
+                "inputSchema": {
+                    "json": {
+                        "type": "object",
+                        "properties": {},
+                    }
+                },
+                "description": description,
+            }
+            return func
+
+        return decorator
+
+    strands.Agent = FakeAgent
+    strands.tool = fake_tool
+
+    models = types.ModuleType("strands.models")
+
+    class FakeBedrockModel:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    models.BedrockModel = FakeBedrockModel
+
+    multiagent = types.ModuleType("strands.multiagent")
+    a2a = types.ModuleType("strands.multiagent.a2a")
+
+    class FakeA2AServer:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    a2a.A2AServer = FakeA2AServer
+
+    sys.modules["strands"] = strands
+    sys.modules["strands.models"] = models
+    sys.modules["strands.multiagent"] = multiagent
+    sys.modules["strands.multiagent.a2a"] = a2a
+
+
+def _load_context_tools():
+    _install_fake_strands_modules()
+    module_name = "runtime_cloudwatch_context_tools_under_test"
+    sys.modules.pop(module_name, None)
+    module_path = Path(__file__).resolve().parents[1] / "context_tools.py"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class FakeMCPTool:
+    def __init__(self, name):
+        self.tool_spec = {"name": name}
+
+
+class FakeMCPClient:
+    def __init__(self):
+        self.calls = []
+
+    def call_tool_sync(self, tool_use_id, name, arguments):
+        self.calls.append(
+            {
+                "tool_use_id": tool_use_id,
+                "name": name,
+                "arguments": arguments,
+            }
+        )
+        return {
+            "status": "success",
+            "content": [
+                {
+                    "text": json.dumps(
+                        {
+                            "called": name,
+                            "arguments": arguments,
+                        },
+                        sort_keys=True,
+                    )
+                }
+            ],
+        }
+
+
+class CloudWatchNovaWrapperTests(unittest.TestCase):
+    def setUp(self):
+        self.context_tools = _load_context_tools()
+        self.context_tools.set_context("default", "us-east-1")
+        self.client = FakeMCPClient()
+
+    def _create_wrappers(self, tool_names):
+        mcp_tools = [FakeMCPTool(name) for name in tool_names]
+        wrappers = self.context_tools._create_nova_wrapper_tools(self.client, mcp_tools)
+        return {wrapper.tool_name: wrapper for wrapper in wrappers}
+
+    def test_exposes_expected_nova_safe_tool_names(self):
+        wrappers = self._create_wrappers(
+            [
+                "cloudwatch-mcp___get_active_alarms",
+                "aws-api-mcp___call_aws",
+            ]
+        )
+
+        self.assertEqual(
+            set(wrappers),
+            {
+                "get_active_alarms",
+                "get_alarm_details",
+                "get_metric_history",
+                "list_log_groups",
+                "search_log_events",
+            },
+        )
+
+    def test_get_active_alarms_prefers_cloudwatch_mcp_tool(self):
+        wrappers = self._create_wrappers(
+            [
+                "cloudwatch-mcp___get_active_alarms",
+                "aws-api-mcp___call_aws",
+            ]
+        )
+
+        wrappers["get_active_alarms"]()
+
+        self.assertEqual(self.client.calls[0]["name"], "cloudwatch-mcp___get_active_alarms")
+        self.assertEqual(
+            self.client.calls[0]["arguments"],
+            {"account_name": "default", "region": "us-east-1"},
+        )
+
+    def test_get_alarm_details_uses_read_only_cloudwatch_cli(self):
+        wrappers = self._create_wrappers(["aws-api-mcp___call_aws"])
+
+        wrappers["get_alarm_details"]("CPU Alarm")
+
+        call = self.client.calls[0]
+        self.assertEqual(call["name"], "aws-api-mcp___call_aws")
+        self.assertEqual(call["arguments"]["account_name"], "default")
+        self.assertEqual(call["arguments"]["region"], "us-east-1")
+        self.assertIn("aws cloudwatch describe-alarms", call["arguments"]["cli_command"])
+        self.assertIn("--alarm-names 'CPU Alarm'", call["arguments"]["cli_command"])
+
+    def test_get_metric_history_builds_dimensions_and_clamps_period(self):
+        wrappers = self._create_wrappers(["aws-api-mcp___call_aws"])
+
+        wrappers["get_metric_history"](
+            namespace="AWS/ECS",
+            metric_name="CPUUtilization",
+            dimensions_json=json.dumps(
+                [
+                    {"Name": "ClusterName", "Value": "cluster-a"},
+                    {"Name": "ServiceName", "Value": "service-a"},
+                ]
+            ),
+            minutes=30,
+            period_seconds=10,
+            statistic="Maximum",
+        )
+
+        command = self.client.calls[0]["arguments"]["cli_command"]
+        self.assertIn("aws cloudwatch get-metric-statistics", command)
+        self.assertIn("--namespace AWS/ECS", command)
+        self.assertIn("--metric-name CPUUtilization", command)
+        self.assertIn("--period 60", command)
+        self.assertIn("--statistics Maximum", command)
+        self.assertIn("--dimensions Name=ClusterName,Value=cluster-a Name=ServiceName,Value=service-a", command)
+
+    def test_get_metric_history_rejects_invalid_dimensions_json(self):
+        wrappers = self._create_wrappers(["aws-api-mcp___call_aws"])
+
+        result = wrappers["get_metric_history"](
+            namespace="AWS/ECS",
+            metric_name="CPUUtilization",
+            dimensions_json="not-json",
+        )
+
+        self.assertIn("dimensions_json must be a JSON array", result)
+        self.assertEqual(self.client.calls, [])
+
+    def test_search_log_events_requires_log_group_name(self):
+        wrappers = self._create_wrappers(["aws-api-mcp___call_aws"])
+
+        result = wrappers["search_log_events"](log_group_name="")
+
+        self.assertIn("log_group_name is required", result)
+        self.assertEqual(self.client.calls, [])
+
+
+if __name__ == "__main__":
+    unittest.main()
