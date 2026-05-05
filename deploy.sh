@@ -60,6 +60,8 @@ export AUTOMATICK_MODE="${AUTOMATICK_MODE:-headless}"
 export ENABLE_FRONTEND="${ENABLE_FRONTEND:-false}"
 export ENABLE_JIRA="${ENABLE_JIRA:-false}"
 export ENABLE_FRESHDESK="${ENABLE_FRESHDESK:-true}"
+export PROJECT_TAG_VALUE="${PROJECT_TAG_VALUE:-mps-ops-utomation-poc}"
+export OWNER_TAG_VALUE="${OWNER_TAG_VALUE:-simone.ferraro}"
 export CDK_PYTHON="${CDK_PYTHON:-python3.11}"
 if [ -z "${BACKEND_DOCKER_PLATFORM:-}" ]; then
   case "$(uname -m)" in
@@ -86,6 +88,7 @@ echo "Mode: $AUTOMATICK_MODE"
 echo "Frontend: $ENABLE_FRONTEND | Jira: $ENABLE_JIRA | Freshdesk: $ENABLE_FRESHDESK"
 echo "Backend platform: $BACKEND_DOCKER_PLATFORM | ECS CPU: $BACKEND_CPU_ARCHITECTURE"
 echo "CDK Python: $CDK_PYTHON"
+echo "Resource tags: Project=$PROJECT_TAG_VALUE | owner=$OWNER_TAG_VALUE"
 echo ""
 
 # Tee all output (stdout + stderr) to a timestamped log file
@@ -133,6 +136,27 @@ echo ""
 
 # Set script directory for absolute path references
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_TAG_ARGS=("Key=Project,Value=$PROJECT_TAG_VALUE" "Key=owner,Value=$OWNER_TAG_VALUE")
+PROJECT_TAG_MAP="Project=$PROJECT_TAG_VALUE,owner=$OWNER_TAG_VALUE"
+
+tag_agentcore_resource() {
+  local RESOURCE_ARN="$1"
+  local LABEL="$2"
+  if [ -z "$RESOURCE_ARN" ] || [ "$RESOURCE_ARN" = "None" ] || [ "$RESOURCE_ARN" = "null" ]; then
+    return 0
+  fi
+  aws bedrock-agentcore-control tag-resource \
+    --resource-arn "$RESOURCE_ARN" \
+    --tags "$PROJECT_TAG_MAP" \
+    --region "$REGION" >/dev/null 2>&1 && \
+    echo "  ✓ Tagged $LABEL" || echo "  ⚠️ Could not tag $LABEL"
+}
+
+tag_iam_role() {
+  local ROLE_NAME="$1"
+  aws iam tag-role --role-name "$ROLE_NAME" --tags "${PROJECT_TAG_ARGS[@]}" >/dev/null 2>&1 && \
+    echo "  ✓ Tagged IAM role: $ROLE_NAME" || true
+}
 
 # Helper function: Get CLI caller's managed policies (handles both IAM users and assumed roles)
 get_cli_managed_policies() {
@@ -197,6 +221,7 @@ if ! aws ecr describe-repositories --repository-names "$ECR_REPO_NAME" --region 
   aws ecr create-repository \
     --repository-name "$ECR_REPO_NAME" \
     --region "$REGION" \
+    --tags "${PROJECT_TAG_ARGS[@]}" \
     --image-scanning-configuration scanOnPush=true \
     --encryption-configuration encryptionType=AES256
   
@@ -208,6 +233,10 @@ if ! aws ecr describe-repositories --repository-names "$ECR_REPO_NAME" --region 
 else
   echo "✓ ECR repository exists"
 fi
+aws ecr tag-resource \
+  --resource-arn "arn:aws:ecr:${REGION}:${ACCOUNT_ID}:repository/${ECR_REPO_NAME}" \
+  --tags "${PROJECT_TAG_ARGS[@]}" \
+  --region "$REGION" >/dev/null 2>&1 || true
 
 # Login to ECR
 echo "Authenticating with ECR..."
@@ -309,6 +338,7 @@ if [ ${#SUPERVISOR_ARN} -lt 70 ]; then
   cd "$SCRIPT_DIR"
   exit 1
 fi
+tag_agentcore_resource "$SUPERVISOR_ARN" "Supervisor runtime"
 
 echo ""
 echo "✓ Supervisor Runtime deployed"
@@ -398,6 +428,7 @@ aws iam put-role-policy \
       {\"Sid\":\"GetSecretValue\",\"Effect\":\"Allow\",\"Action\":[\"secretsmanager:GetSecretValue\"],\"Resource\":\"arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:bedrock-agentcore-identity*\"}
     ]
   }" >/dev/null 2>&1
+tag_iam_role "$GATEWAY_ROLE_NAME"
 
 # Attach CLI caller's managed policies to gateway role
 echo "  Attaching CLI caller's managed policies to gateway role..."
@@ -450,6 +481,7 @@ if [ -z "$APIGW_LOGS_ROLE_ARN" ] || [ "$APIGW_LOGS_ROLE_ARN" = "None" ]; then
 fi
 
 aws iam wait role-exists --role-name "$APIGW_LOGS_ROLE_NAME"
+tag_iam_role "$APIGW_LOGS_ROLE_NAME"
 aws iam update-assume-role-policy \
   --role-name "$APIGW_LOGS_ROLE_NAME" \
   --policy-document "$APIGW_LOGS_TRUST_POLICY" >/dev/null
@@ -759,6 +791,7 @@ deploy_mcp_server() {
     echo -e "${RED}Error: Could not get ${MCP_NAME} Runtime ARN${NC}" >&2
     cd "$SCRIPT_DIR"; exit 1
   fi
+  tag_agentcore_resource "$ARN" "${MCP_NAME} runtime" >&2
 
   echo "  ✓ ${MCP_NAME} deployed: $ARN" >&2
   cd "$SCRIPT_DIR"
@@ -816,6 +849,7 @@ aws iam put-role-policy \
       {\"Sid\":\"GetSecretValue\",\"Effect\":\"Allow\",\"Action\":[\"secretsmanager:GetSecretValue\"],\"Resource\":\"arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:bedrock-agentcore-identity*\"}
     ]
   }" >/dev/null 2>&1
+tag_iam_role "$GATEWAY_ROLE_NAME"
 
 # Attach CLI caller's managed policies to gateway role
 echo "  Attaching CLI caller's managed policies to gateway role..."
@@ -853,6 +887,7 @@ if [ -z "$GATEWAY_ID" ] || [ "$GATEWAY_ID" = "None" ] || [ "$GATEWAY_ID" = "null
     --role-arn "$GATEWAY_ROLE_ARN" \
     --protocol-type MCP \
     --authorizer-type AWS_IAM \
+    --tags "$PROJECT_TAG_MAP" \
     --region $REGION --output json 2>&1)
 
   GATEWAY_ID=$(echo "$GATEWAY_RESPONSE" | jq -r '.gatewayId // empty')
@@ -895,6 +930,10 @@ if [ -n "$GATEWAY_ID" ] && [ "$GATEWAY_ID" != "None" ]; then
   GATEWAY_URL=$(aws bedrock-agentcore-control get-gateway \
     --gateway-identifier $GATEWAY_ID --region $REGION \
     --query 'gatewayUrl' --output text 2>/dev/null)
+  GATEWAY_ARN=$(aws bedrock-agentcore-control get-gateway \
+    --gateway-identifier $GATEWAY_ID --region $REGION \
+    --query 'gatewayArn' --output text 2>/dev/null)
+  tag_agentcore_resource "$GATEWAY_ARN" "AgentCore gateway"
   echo "  Gateway URL: $GATEWAY_URL"
 
   # Discover OAuth credential provider ARN dynamically
@@ -1523,6 +1562,7 @@ ENVEOF
     cd "$SCRIPT_DIR"
     exit 1
   fi
+  tag_agentcore_resource "$ARN" "${runtime_name} A2A runtime"
   
   eval "A2A_ARN_${runtime_name}=\$ARN"
   echo "  ✓ ${runtime_name} A2A Runtime deployed"
@@ -1666,6 +1706,7 @@ fi
 
 # Verify ARN hasn't changed
 NEW_SUPERVISOR_ARN=$(agentcore status 2>&1 | grep "Agent ARN:" -A 1 | grep "arn:aws" | grep -oE 'arn:aws:bedrock-agentcore:[^[:space:]]+' | head -1)
+tag_agentcore_resource "$NEW_SUPERVISOR_ARN" "Supervisor runtime"
 
 echo ""
 echo "✓ Supervisor redeployed with A2A coordination"

@@ -28,11 +28,18 @@ import json
 import boto3
 import time
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL_SECONDS = 10
 POLL_MAX_ATTEMPTS = 30
+PROJECT_TAG_VALUE = os.getenv("PROJECT_TAG_VALUE", "mps-ops-utomation-poc")
+OWNER_TAG_VALUE = os.getenv("OWNER_TAG_VALUE", "simone.ferraro")
+PROJECT_TAGS = {
+    "Project": PROJECT_TAG_VALUE,
+    "owner": OWNER_TAG_VALUE,
+}
 
 
 class AgentCoreStack(Stack):
@@ -230,6 +237,15 @@ class AgentCoreStack(Stack):
 
         raise TimeoutError(f"Memory not ACTIVE after {POLL_MAX_ATTEMPTS * POLL_INTERVAL_SECONDS}s")
 
+    @staticmethod
+    def _tag_agentcore_resource(client, resource_arn: str, resource_label: str) -> None:
+        """Apply project ownership tags to AgentCore resources when the API supports it."""
+        try:
+            client.tag_resource(resourceArn=resource_arn, tags=PROJECT_TAGS)
+            logger.info(f"Tagged {resource_label}: {resource_arn}")
+        except Exception as exc:
+            logger.warning(f"Could not tag {resource_label} {resource_arn}: {exc}")
+
     def _create_memory(self) -> dict:
         """
         Create AgentCore Memory - Robust Get or Create pattern
@@ -251,6 +267,7 @@ class AgentCoreStack(Stack):
                         logger.info(f"Found existing memory: {mem_summary['id']}")
                         memory_id = mem_summary['id']
                         memory_arn = mem_summary['arn']
+                        self._tag_agentcore_resource(client, memory_arn, "AgentCore memory")
 
                         if mem_detail['memory']['status'] == 'ACTIVE':
                             logger.info(f"Memory {memory_id} is ACTIVE")
@@ -283,7 +300,8 @@ class AgentCoreStack(Stack):
                             'namespaces': ['/strategy/{memoryStrategyId}/actor/{actorId}/session/{sessionId}/']
                         }
                     }
-                ]
+                ],
+                tags=PROJECT_TAGS
             )
 
             memory_id = response['memory']['id']
@@ -340,6 +358,7 @@ class AgentCoreStack(Stack):
         existing = self._find_gateway_by_name(client, gateway_name)
         if existing:
             logger.info(f"Using existing gateway: {existing['id']}")
+            self._tag_agentcore_resource(client, existing['arn'], "AgentCore gateway")
             return existing
 
         # ONLY CREATE IF NOT FOUND
@@ -354,7 +373,8 @@ class AgentCoreStack(Stack):
                     'mcp': {
                         'searchType': 'SEMANTIC'
                     }
-                }
+                },
+                tags=PROJECT_TAGS
             )
 
             logger.info(f"Created gateway: {response['gatewayArn']}")
@@ -373,6 +393,7 @@ class AgentCoreStack(Stack):
             existing = self._find_gateway_by_name(client, gateway_name)
             if existing:
                 logger.info(f"Retrieved existing gateway: {existing['id']}")
+                self._tag_agentcore_resource(client, existing['arn'], "AgentCore gateway")
                 return existing
 
             # Should not reach here: ConflictException means the gateway exists, but

@@ -42,6 +42,9 @@ from stacks.frontend_stack import FrontendStack
 
 app = cdk.App()
 
+PROJECT_TAG_VALUE = os.getenv("PROJECT_TAG_VALUE", "mps-ops-utomation-poc")
+OWNER_TAG_VALUE = os.getenv("OWNER_TAG_VALUE", "simone.ferraro")
+
 # Get config
 env = cdk.Environment(
     account=app.node.try_get_context("account"),
@@ -88,7 +91,8 @@ if enable_frontend:
 
 # Tags
 for stack in stacks:
-    cdk.Tags.of(stack).add("Project", "Automatick-AgentCore")
+    cdk.Tags.of(stack).add("Project", PROJECT_TAG_VALUE)
+    cdk.Tags.of(stack).add("owner", OWNER_TAG_VALUE)
     cdk.Tags.of(stack).add("ManagedBy", "CDK")
 
 app.synth()
