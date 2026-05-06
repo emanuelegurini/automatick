@@ -40,6 +40,7 @@ SPECIALIST_ARN_MAP: Dict[str, str] = {
     "advisor":    os.getenv("ADVISOR_A2A_ARN", ""),
     "jira":       os.getenv("JIRA_A2A_ARN", ""),
     "knowledge":  os.getenv("KNOWLEDGE_A2A_ARN", ""),
+    "runtime_diagnostics": os.getenv("RUNTIME_DIAGNOSTICS_A2A_ARN", ""),
 }
 
 # Module-level singleton
@@ -97,7 +98,7 @@ class DirectRouterClient:
 
         Args:
             agent_hint: Domain key — one of cloudwatch, security, cost, advisor,
-                        jira, knowledge.
+                        jira, knowledge, runtime_diagnostics.
 
         Returns:
             True only when ENABLE_DIRECT_SPECIALIST_ROUTING=true and the
@@ -121,7 +122,8 @@ class DirectRouterClient:
         Invoke a specialist A2A runtime directly.
 
         Args:
-            agent_key: One of cloudwatch, security, cost, advisor, jira, knowledge
+            agent_key: One of cloudwatch, security, cost, advisor, jira, knowledge,
+                       runtime_diagnostics
             prompt: User's question (plain text, no metadata prefix needed here)
             account_name: Customer account name (or "default" for MSP account)
             region: AWS region

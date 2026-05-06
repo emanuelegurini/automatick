@@ -229,6 +229,7 @@ async def invoke(request: Request):
                 "check_security": "security",
                 "analyze_costs": "cost",
                 "check_advisor": "advisor",
+                "check_runtime_diagnostics": "runtime_diagnostics",
                 "manage_jira": "jira",
                 "search_knowledge": "knowledge"
             }

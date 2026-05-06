@@ -55,6 +55,7 @@ AGENT_ARNS = {
     "advisor": os.getenv("ADVISOR_A2A_ARN"),
     "knowledge": os.getenv("KNOWLEDGE_A2A_ARN"),
     "jira": os.getenv("JIRA_A2A_ARN"),
+    "runtime_diagnostics": os.getenv("RUNTIME_DIAGNOSTICS_A2A_ARN"),
 }
 
 # Startup debug logging to verify env file loading
@@ -91,7 +92,7 @@ def send_to_agent_sync(
     when the agent is already processing another request.
 
     Args:
-        agent_key: One of cloudwatch, security, cost, advisor, knowledge, jira
+        agent_key: One of cloudwatch, security, cost, advisor, knowledge, jira, runtime_diagnostics
         prompt: The user's question
         account_name: Customer account name (or "default" for MSP account)
         region: AWS region

@@ -365,6 +365,70 @@ class CrossAccountManager:
                                         "Resource": "*"
                                     },
                                     {
+                                        "Sid": "RuntimeDiagnosticsEC2Describe",
+                                        "Effect": "Allow",
+                                        "Action": [
+                                            "ec2:DescribeInstances"
+                                        ],
+                                        "Resource": "*"
+                                    },
+                                    {
+                                        "Sid": "RuntimeDiagnosticsSSMRead",
+                                        "Effect": "Allow",
+                                        "Action": [
+                                            "ssm:DescribeInstanceInformation",
+                                            "ssm:GetCommandInvocation",
+                                            "ssm:ListCommandInvocations"
+                                        ],
+                                        "Resource": "*"
+                                    },
+                                    {
+                                        "Sid": "RuntimeDiagnosticsSSMSendApprovedDocument",
+                                        "Effect": "Allow",
+                                        "Action": [
+                                            "ssm:SendCommand"
+                                        ],
+                                        "Resource": {
+                                            "Fn::Sub": "arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-RunShellScript"
+                                        }
+                                    },
+                                    {
+                                        "Sid": "RuntimeDiagnosticsSSMSendTaggedInstances",
+                                        "Effect": "Allow",
+                                        "Action": [
+                                            "ssm:SendCommand"
+                                        ],
+                                        "Resource": {
+                                            "Fn::Sub": "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+                                        },
+                                        "Condition": {
+                                            "StringEquals": {
+                                                "ssm:resourceTag/AutomatickDiagnostics": "true"
+                                            }
+                                        }
+                                    },
+                                    {
+                                        "Sid": "RuntimeDiagnosticsECSReadOnly",
+                                        "Effect": "Allow",
+                                        "Action": [
+                                            "ecs:DescribeClusters",
+                                            "ecs:DescribeServices",
+                                            "ecs:DescribeTasks",
+                                            "ecs:ListTasks"
+                                        ],
+                                        "Resource": "*"
+                                    },
+                                    {
+                                        "Sid": "RuntimeDiagnosticsRDSReadOnly",
+                                        "Effect": "Allow",
+                                        "Action": [
+                                            "rds:DescribeDBInstances",
+                                            "rds:DescribeDBClusters",
+                                            "rds:DescribeEvents"
+                                        ],
+                                        "Resource": "*"
+                                    },
+                                    {
                                         "Sid": "SecurityHubAccess",
                                         "Effect": "Allow",
                                         "Action": [

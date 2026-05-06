@@ -115,6 +115,7 @@ class AgentCoreStack(Stack):
             'advisor':    self.node.try_get_context("advisor_a2a_arn") or "",
             'jira':       self.node.try_get_context("jira_a2a_arn") or "",
             'knowledge':  self.node.try_get_context("knowledge_a2a_arn") or "",
+            'runtime_diagnostics': self.node.try_get_context("runtime_diagnostics_a2a_arn") or "",
         }
 
         self.resources['cloudwatch_a2a_arn'] = a2a_arns['cloudwatch']
@@ -123,10 +124,11 @@ class AgentCoreStack(Stack):
         self.resources['advisor_a2a_arn']     = a2a_arns['advisor']
         self.resources['jira_a2a_arn']        = a2a_arns['jira']
         self.resources['knowledge_a2a_arn']   = a2a_arns['knowledge']
+        self.resources['runtime_diagnostics_a2a_arn'] = a2a_arns['runtime_diagnostics']
 
         configured_count = sum(1 for v in a2a_arns.values() if v)
         if configured_count > 0:
-            logger.info(f"A2A specialist ARNs loaded: {configured_count}/6 configured")
+            logger.info(f"A2A specialist ARNs loaded: {configured_count}/7 configured")
         else:
             logger.info(f"No A2A ARNs in context")
 

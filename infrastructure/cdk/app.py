@@ -26,7 +26,8 @@ Context variables (passed via --context or cdk.json):
   region                  — AWS region (defaults to us-east-1)
   supervisor_runtime_arn  — AgentCore Supervisor Runtime ARN (set by deploy.sh)
   cloudwatch_a2a_arn, security_a2a_arn, cost_a2a_arn,
-  advisor_a2a_arn, jira_a2a_arn, knowledge_a2a_arn
+  advisor_a2a_arn, jira_a2a_arn, knowledge_a2a_arn,
+  runtime_diagnostics_a2a_arn
                           — A2A Specialist Runtime ARNs for Supervisor routing
                             (optional; populated by deploy.sh Step 9)
   alb_dns                 — ALB DNS name for CloudFront → ALB SSE streaming

@@ -179,6 +179,23 @@ def check_advisor(prompt: str) -> str:
 
 
 @tool
+def check_runtime_diagnostics(prompt: str) -> str:
+    """Collect read-only runtime diagnostics from EC2/SSM, ECS, and RDS.
+
+    Use for: in-instance EC2 checks, SSM managed status, disk/memory/CPU/process
+    evidence, ECS service/task/deployment health, RDS status/events/metrics.
+
+    Args:
+        prompt: What runtime evidence to collect.
+    """
+    _record_tool("check_runtime_diagnostics")
+    ctx = _current_context.get()
+    account_name, region = ctx["account_name"], ctx["region"]
+    logger.info(f"Runtime diagnostics [{account_name}]: {prompt[:50]}...")
+    return send_to_agent_sync("runtime_diagnostics", prompt, account_name, region)
+
+
+@tool
 def manage_jira(prompt: str) -> str:
     """Search, create, update, or query Jira tickets.
 
@@ -234,6 +251,7 @@ def create_supervisor_tools():
         check_security,
         analyze_costs,
         check_advisor,
+        check_runtime_diagnostics,
         manage_jira,
         search_knowledge
     ]

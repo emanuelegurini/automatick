@@ -22,7 +22,7 @@ from strands.multiagent.a2a import A2AServer
 
 logger = logging.getLogger(__name__)
 
-MODEL = os.getenv('MODEL_ID', os.getenv('MODEL', 'us.amazon.nova-pro-v1:0'))
+MODEL = os.getenv('MODEL_ID', os.getenv('MODEL', 'amazon.nova-pro-v1:0'))
 MAX_TOKENS = int(os.getenv('MAX_TOKENS', '4096'))
 BEDROCK_STREAMING = os.getenv('BEDROCK_STREAMING', 'false').lower() in ('1', 'true', 'yes', 'on')
 CLOUDWATCH_USE_WRAPPER_TOOLS = os.getenv(

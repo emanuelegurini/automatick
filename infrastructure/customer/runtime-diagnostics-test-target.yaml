@@ -1,0 +1,186 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Automatick runtime diagnostics test target: EC2 with SSM and cross-account diagnostics role."
+
+Parameters:
+  AgentPrincipalArn:
+    Type: String
+    Description: ARN of the Automatick AgentCore runtime role or MSP principal allowed to assume the diagnostics role.
+  ExternalId:
+    Type: String
+    NoEcho: true
+    Description: Customer-specific ExternalId required by the diagnostics role trust policy.
+  DiagnosticsRoleName:
+    Type: String
+    Default: AutomatickRuntimeDiagnosticsRole
+    Description: Name for the cross-account role created in this customer account.
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC for the EC2 test instance.
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Subnet for the EC2 test instance. Use a subnet with outbound access to SSM for the PoC.
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+    Description: EC2 instance type for the test target.
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Amazon Linux 2023 AMI SSM parameter.
+  KeyName:
+    Type: String
+    Default: ""
+    Description: Optional EC2 key pair name. Leave empty for SSM-only access.
+
+Conditions:
+  HasKeyName: !Not [!Equals [!Ref KeyName, ""]]
+
+Resources:
+  RuntimeDiagnosticsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref DiagnosticsRoleName
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Ref AgentPrincipalArn
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ExternalId
+      Policies:
+        - PolicyName: RuntimeDiagnosticsReadOnly
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: EC2Describe
+                Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                Resource: "*"
+              - Sid: SSMDescribeAndReadResults
+                Effect: Allow
+                Action:
+                  - ssm:DescribeInstanceInformation
+                  - ssm:GetCommandInvocation
+                  - ssm:ListCommandInvocations
+                Resource: "*"
+              - Sid: SSMSendApprovedDocument
+                Effect: Allow
+                Action:
+                  - ssm:SendCommand
+                Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-RunShellScript
+              - Sid: SSMSendTaggedInstancesOnly
+                Effect: Allow
+                Action:
+                  - ssm:SendCommand
+                Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*
+                Condition:
+                  StringEquals:
+                    ssm:resourceTag/AutomatickDiagnostics: "true"
+              - Sid: ECSReadOnly
+                Effect: Allow
+                Action:
+                  - ecs:DescribeClusters
+                  - ecs:DescribeServices
+                  - ecs:DescribeTasks
+                  - ecs:ListTasks
+                Resource: "*"
+              - Sid: RDSReadOnly
+                Effect: Allow
+                Action:
+                  - rds:DescribeDBInstances
+                  - rds:DescribeDBClusters
+                  - rds:DescribeEvents
+                Resource: "*"
+              - Sid: CloudWatchAndLogsReadOnly
+                Effect: Allow
+                Action:
+                  - cloudwatch:GetMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                  - logs:GetLogEvents
+                  - logs:FilterLogEvents
+                Resource: "*"
+              - Sid: STSIdentity
+                Effect: Allow
+                Action:
+                  - sts:GetCallerIdentity
+                Resource: "*"
+
+  RuntimeDiagnosticsInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  RuntimeDiagnosticsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref RuntimeDiagnosticsInstanceRole
+
+  RuntimeDiagnosticsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Automatick runtime diagnostics test target. No inbound access required for SSM.
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: automatick-runtime-diagnostics-test-sg
+
+  RuntimeDiagnosticsInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref RuntimeDiagnosticsInstanceProfile
+      KeyName: !If [HasKeyName, !Ref KeyName, !Ref AWS::NoValue]
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          SubnetId: !Ref SubnetId
+          GroupSet:
+            - !Ref RuntimeDiagnosticsSecurityGroup
+          AssociatePublicIpAddress: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          dnf install -y amazon-ssm-agent || true
+          systemctl enable amazon-ssm-agent || true
+          systemctl start amazon-ssm-agent || true
+      Tags:
+        - Key: Name
+          Value: automatick-runtime-diagnostics-test
+        - Key: AutomatickDiagnostics
+          Value: "true"
+        - Key: Environment
+          Value: test
+
+Outputs:
+  DiagnosticsRoleArn:
+    Description: Cross-account role ARN to store in msp-credentials/{account_name}.
+    Value: !GetAtt RuntimeDiagnosticsRole.Arn
+  InstanceId:
+    Description: EC2 instance ID for runtime diagnostics tests.
+    Value: !Ref RuntimeDiagnosticsInstance
+  InstanceProfileName:
+    Description: Instance profile attached to the EC2 test target.
+    Value: !Ref RuntimeDiagnosticsInstanceProfile
