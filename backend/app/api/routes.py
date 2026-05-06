@@ -29,7 +29,7 @@ from app.services.account_service import get_account_service
 from app.core.secrets_credential_manager import get_current_msp_principal_arn, get_current_msp_account_id
 from app.services.health_service import get_health_service
 from app.services.workflow_service import get_workflow_service
-from app.core.direct_router import get_direct_router
+from app.core.direct_router import get_direct_router, is_direct_routing_enabled
 from app.core.config import settings
 import asyncio
 import threading
@@ -93,7 +93,7 @@ def _get_memory_client():
         try:
             from bedrock_agentcore.memory import MemoryClient
             _memory_client = MemoryClient(region_name=settings.AWS_REGION)
-            logger.info("AgentCore MemoryClient initialized for direct routing path")
+            logger.info("AgentCore MemoryClient initialized")
         except Exception as e:
             logger.warning(f"AgentCore MemoryClient init failed: {e}")
     return _memory_client
@@ -381,13 +381,14 @@ async def _process_chat_async(request_id: str, request: ChatRequest, current_use
     and forwarded to connected SSE clients by get_progress_stream().
 
     High-level flow:
-      1. Staggered asyncio Tasks emit routing/agent_switch/tool_call SSE events to
+      1. Staggered asyncio Tasks emit neutral routing progress events to
          DynamoDB so the frontend ThinkingDropdown has live progress before the
          AgentCore response arrives.
-      2. Try direct routing: if the query maps to a single specialist domain, invoke
-         that specialist's Runtime ARN directly (saves 45-90 s vs Supervisor roundtrip).
-      3. Fallback to Supervisor Runtime streaming.  SSE events from the stream are
-         forwarded atomically to DynamoDB (append_streaming_event + set_streaming_content).
+      2. Invoke the Supervisor Runtime streaming path so it decides which specialist
+         to use. Optional direct specialist routing is available only when
+         ENABLE_DIRECT_SPECIALIST_ROUTING=true.
+      3. Forward SSE events from the Supervisor stream atomically to DynamoDB
+         (append_streaming_event + set_streaming_content).
       4. After the response arrives, check whether it describes active alarms/issues
          (via _should_trigger_remediation) and optionally start a workflow.
       5. Call complete_request() or fail_request() to unblock polling clients.
@@ -451,6 +452,7 @@ async def _process_chat_async(request_id: str, request: ChatRequest, current_use
         routing_reason = _build_routing_reason(request.message, agent_hint)
         expected_agents = _detect_multi_agents(request.message)
         specialist_tool = tool_name_map.get(agent_hint, agent_hint)
+        direct_routing_enabled = is_direct_routing_enabled()
 
         # Steps 1-4 below fire staggered SSE progress events to DynamoDB so that the
         # frontend ThinkingDropdown shows live activity instead of a blank spinner
@@ -467,31 +469,44 @@ async def _process_chat_async(request_id: str, request: ChatRequest, current_use
         # Emit step 2: Routing decision with reason (after 1s)
         async def _emit_routing():
             await asyncio.sleep(1)
-            update_progress(request_id, "routing", "Routing to specialist agent")
-            append_streaming_event(request_id, {
-                "event": "agent_switch",
-                "data": {
-                    "from_agent": "supervisor",
-                    "to_agent": agent_hint,
-                    "message": f"Routing to {agent_hint} specialist",
-                    "routing_reason": routing_reason,
-                    "agent_index": 1,
-                    "agent_count": len(expected_agents) if len(expected_agents) > 1 else 1,
-                }
-            })
-            append_streaming_event(request_id, {
-                "event": "tool_call",
-                "data": {
-                    "tool_name": specialist_tool,
-                    "agent": agent_hint,
-                    "routing_reason": query_snippet,
-                }
-            })
+            if direct_routing_enabled and agent_hint != 'supervisor':
+                update_progress(request_id, "routing", "Routing to specialist agent")
+                append_streaming_event(request_id, {
+                    "event": "agent_switch",
+                    "data": {
+                        "from_agent": "supervisor",
+                        "to_agent": agent_hint,
+                        "message": f"Routing to {agent_hint} specialist",
+                        "routing_reason": routing_reason,
+                        "agent_index": 1,
+                        "agent_count": len(expected_agents) if len(expected_agents) > 1 else 1,
+                    }
+                })
+                append_streaming_event(request_id, {
+                    "event": "tool_call",
+                    "data": {
+                        "tool_name": specialist_tool,
+                        "agent": agent_hint,
+                        "routing_reason": query_snippet,
+                    }
+                })
+            else:
+                update_progress(request_id, "routing", "Supervisor selecting specialist agent")
+                append_streaming_event(request_id, {
+                    "event": "progress",
+                    "data": {
+                        "stage": "routing",
+                        "message": "Supervisor evaluating specialist routing",
+                    }
+                })
 
         # Emit step 3: Execution progress (after 3s)
         async def _emit_delegating():
             await asyncio.sleep(3)
-            exec_msg = agent_messages.get(agent_hint, f"{agent_hint} agent processing")
+            if direct_routing_enabled and agent_hint != 'supervisor':
+                exec_msg = agent_messages.get(agent_hint, f"{agent_hint} agent processing")
+            else:
+                exec_msg = "Supervisor coordinating specialist analysis"
             update_progress(request_id, "delegating", exec_msg)
             append_streaming_event(request_id, {
                 "event": "progress",
@@ -516,7 +531,7 @@ async def _process_chat_async(request_id: str, request: ChatRequest, current_use
         # For multi-domain queries, emit a separate agent_switch event per specialist
         # so the ThinkingDropdown shows each agent being invoked in sequence.
         # Delays are staggered (5 s, 17 s, 29 s, …) to roughly match real agent latency.
-        if len(expected_agents) > 1:
+        if direct_routing_enabled and len(expected_agents) > 1:
             for idx, agent_key in enumerate(expected_agents):
                 delay = 5 + idx * 12
                 agent_msg = agent_messages.get(agent_key, f"Querying {agent_key} agent")
@@ -581,12 +596,12 @@ async def _process_chat_async(request_id: str, request: ChatRequest, current_use
                 "workflow_id": wf_id,
             })
 
-        # --- Load conversation history from AgentCore Memory (direct routing path) ---
+        # --- Load conversation history from AgentCore Memory for optional direct routing ---
         # The Supervisor Runtime loads memory internally (supervisor_runtime.py).
         # For the direct-routing path we load it here and prepend it to the prompt so
         # specialists receive the same recent-turns context they would get via Supervisor.
         memory_context_prefix = ""
-        memory_id = settings.MEMORY_ID
+        memory_id = settings.MEMORY_ID if direct_routing_enabled else ""
         if memory_id:
             try:
                 mem_client = _get_memory_client()
@@ -612,7 +627,7 @@ async def _process_chat_async(request_id: str, request: ChatRequest, current_use
         # each other's context even though they share the same memory resource.
         ltm_context = ""
         ltm_strategy_id = _get_semantic_strategy_id()
-        if ltm_strategy_id and settings.MEMORY_ID:
+        if direct_routing_enabled and ltm_strategy_id and settings.MEMORY_ID:
             try:
                 mem_client = _get_memory_client()
                 if mem_client:
@@ -632,13 +647,12 @@ async def _process_chat_async(request_id: str, request: ChatRequest, current_use
             except Exception as ltm_err:
                 logger.warning(f"LTM retrieval failed (non-fatal): {ltm_err}")
 
-        # --- Direct routing: bypass Supervisor for unambiguous single-domain queries ---
-        # Saves 45-90 s by calling the specialist A2A Runtime ARN directly, skipping
-        # the Supervisor's tool-selection roundtrip.  Credential injection is identical
-        # to the Supervisor path: account_name is embedded in a metadata JSON prefix that
-        # context_tools._extract_metadata_prompt() reads on the specialist side.
-        # Falls back to Supervisor if the specialist ARN is not configured or returns None.
-        if agent_hint != 'supervisor':
+        # --- Optional direct routing: explicit debug/test path only ---
+        # Normal user traffic stays Supervisor-first so the Supervisor decides which
+        # specialist to invoke. This block runs only when
+        # ENABLE_DIRECT_SPECIALIST_ROUTING=true and falls back to Supervisor if the
+        # specialist ARN is missing or returns None.
+        if agent_hint != 'supervisor' and direct_routing_enabled:
             try:
                 direct_router = get_direct_router()
                 if direct_router.can_route_directly(agent_hint):
@@ -704,6 +718,7 @@ async def _process_chat_async(request_id: str, request: ChatRequest, current_use
         payload = {
             "prompt": request.message,
             "account_name": account_name,
+            "region": AWS_REGION,
             "workflow_enabled": request.workflow_enabled,
             "full_automation": request.full_automation,
             "session_id": session_id,

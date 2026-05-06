@@ -1,7 +1,7 @@
 import os
 import unittest
 from copy import deepcopy
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 os.environ.setdefault("AWS_EC2_METADATA_DISABLED", "true")
 os.environ.setdefault("AWS_ACCESS_KEY_ID", "testing")
@@ -15,7 +15,9 @@ os.environ.setdefault("FRESHDESK_WEBHOOK_SECRET", "correct-secret")
 from fastapi import HTTPException
 
 from app.api.routes import _validate_freshdesk_webhook_secret
+from app.core import direct_router
 from app.services.freshdesk_service import format_private_note
+from app.services import headless_investigation_service as headless_module
 from app.services.headless_investigation_service import (
     HeadlessInvestigationService,
     _build_agentcore_session_id,
@@ -210,7 +212,92 @@ class RemediationLifecycleTests(unittest.TestCase):
         self.assertEqual(approved["execution"], "not_executed")
 
 
+class DirectRouterTests(unittest.TestCase):
+    def test_direct_routing_requires_explicit_flag_even_when_arn_exists(self):
+        old_enabled = direct_router.settings.ENABLE_DIRECT_SPECIALIST_ROUTING
+        old_arn = direct_router.SPECIALIST_ARN_MAP.get("cloudwatch", "")
+        client = object.__new__(direct_router.DirectRouterClient)
+        try:
+            direct_router.SPECIALIST_ARN_MAP["cloudwatch"] = "arn:aws:bedrock-agentcore:test"
+
+            direct_router.settings.ENABLE_DIRECT_SPECIALIST_ROUTING = False
+            self.assertFalse(client.can_route_directly("cloudwatch"))
+
+            direct_router.settings.ENABLE_DIRECT_SPECIALIST_ROUTING = True
+            self.assertTrue(client.can_route_directly("cloudwatch"))
+        finally:
+            direct_router.settings.ENABLE_DIRECT_SPECIALIST_ROUTING = old_enabled
+            direct_router.SPECIALIST_ARN_MAP["cloudwatch"] = old_arn
+
+
 class HeadlessIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_run_investigation_invokes_supervisor_not_direct_router(self):
+        table = FakeTable()
+        service = HeadlessInvestigationService(table=table, freshdesk_client=FakeFreshdeskClient())
+        incident = normalize_freshdesk_payload(
+            {
+                "ticket_id": "12345",
+                "subject": "CloudWatch CPU alarm",
+                "description": "CPUUtilization alarm in eu-west-1",
+                "account_name": "default",
+                "region": "eu-west-1",
+            }
+        )
+
+        class FakeAgentCoreClient:
+            def __init__(self):
+                self.calls = []
+
+            async def invoke_runtime(self, runtime_arn, payload, session_id):
+                self.calls.append(
+                    {
+                        "runtime_arn": runtime_arn,
+                        "payload": payload,
+                        "session_id": session_id,
+                    }
+                )
+                return {
+                    "success": True,
+                    "agent_type": "cloudwatch",
+                    "response": """Root cause hypothesis
+The Supervisor selected CloudWatch for alarm investigation.
+
+Evidence
+CloudWatch alarm context was inspected.
+
+Proposed fix
+Review the alarm and scaling policy.
+
+Risk / impact
+No AWS changes executed.
+
+Proposed action
+Manual review.""",
+                }
+
+        fake_agentcore = FakeAgentCoreClient()
+        old_supervisor_arn = headless_module.settings.SUPERVISOR_RUNTIME_ARN
+        old_direct_enabled = headless_module.settings.ENABLE_DIRECT_SPECIALIST_ROUTING
+        try:
+            headless_module.settings.SUPERVISOR_RUNTIME_ARN = "arn:aws:bedrock-agentcore:test:runtime/supervisor"
+            headless_module.settings.ENABLE_DIRECT_SPECIALIST_ROUTING = True
+            with (
+                patch("app.core.agentcore_client.get_agentcore_client", return_value=fake_agentcore),
+                patch("app.core.direct_router.get_direct_router") as get_direct_router,
+            ):
+                result = await service.run_investigation(incident)
+
+            get_direct_router.assert_not_called()
+            self.assertEqual(result["agent_type"], "cloudwatch")
+            self.assertEqual(len(fake_agentcore.calls), 1)
+            self.assertEqual(fake_agentcore.calls[0]["runtime_arn"], headless_module.settings.SUPERVISOR_RUNTIME_ARN)
+            self.assertEqual(fake_agentcore.calls[0]["payload"]["account_name"], "default")
+            self.assertEqual(fake_agentcore.calls[0]["payload"]["region"], "eu-west-1")
+            self.assertFalse(fake_agentcore.calls[0]["payload"]["workflow_enabled"])
+        finally:
+            headless_module.settings.SUPERVISOR_RUNTIME_ARN = old_supervisor_arn
+            headless_module.settings.ENABLE_DIRECT_SPECIALIST_ROUTING = old_direct_enabled
+
     async def test_webhook_processing_stores_result_posts_note_and_creates_remediation(self):
         table = FakeTable()
         freshdesk = FakeFreshdeskClient()

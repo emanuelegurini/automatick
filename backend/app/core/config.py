@@ -57,9 +57,10 @@ class Settings(BaseSettings):
     GATEWAY_ARN: Optional[str] = ""
     GATEWAY_URL: Optional[str] = ""
     MEMORY_ID: Optional[str] = ""
+    ENABLE_DIRECT_SPECIALIST_ROUTING: bool = False
     
     # A2A Specialist Runtime ARNs (populated by deploy.sh Step 9)
-    # Used by DirectRouterClient to bypass Supervisor for known-domain queries
+    # Used only when ENABLE_DIRECT_SPECIALIST_ROUTING=true for specialist debug/test calls.
     CLOUDWATCH_A2A_ARN: Optional[str] = ""
     SECURITY_A2A_ARN: Optional[str] = ""
     COST_A2A_ARN: Optional[str] = ""

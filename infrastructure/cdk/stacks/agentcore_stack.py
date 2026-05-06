@@ -105,9 +105,9 @@ class AgentCoreStack(Stack):
         else:
             logger.warning(f"No supervisor_runtime_arn in context, using placeholder")
 
-        # 6. A2A Specialist Runtime ARNs for direct routing
+        # 6. A2A Specialist Runtime ARNs for Supervisor-to-specialist routing
         # Read from CDK context (passed by deploy.sh Step 9 after A2A runtimes deployed)
-        # Falls back to empty string if not provided (direct routing disabled, Supervisor used)
+        # Falls back to empty string if not provided
         a2a_arns = {
             'cloudwatch': self.node.try_get_context("cloudwatch_a2a_arn") or "",
             'security':   self.node.try_get_context("security_a2a_arn") or "",
@@ -126,9 +126,9 @@ class AgentCoreStack(Stack):
 
         configured_count = sum(1 for v in a2a_arns.values() if v)
         if configured_count > 0:
-            logger.info(f"A2A direct routing ARNs loaded: {configured_count}/6 configured")
+            logger.info(f"A2A specialist ARNs loaded: {configured_count}/6 configured")
         else:
-            logger.info(f"No A2A ARNs in context — direct routing disabled (Supervisor fallback active)")
+            logger.info(f"No A2A ARNs in context")
 
         # Outputs
         CfnOutput(self, "MemoryId", value=self.resources['memory_id'])

@@ -288,8 +288,9 @@ class BackendStack(Stack):
                     "JIRA_API_TOKEN": os.getenv('JIRA_API_TOKEN', ''),
                     "JIRA_PROJECT_KEY": os.getenv('JIRA_PROJECT_KEY', ''),
                     
-                    # A2A Specialist Runtime ARNs for direct routing (bypasses Supervisor LLM hop)
+                    # A2A Specialist Runtime ARNs used by Supervisor and optional direct debug routing.
                     # Populated by deploy.sh Step 9 via agentcore_resources dict
+                    "ENABLE_DIRECT_SPECIALIST_ROUTING": os.getenv('ENABLE_DIRECT_SPECIALIST_ROUTING', 'false'),
                     "CLOUDWATCH_A2A_ARN": agentcore_resources.get('cloudwatch_a2a_arn', ''),
                     "SECURITY_A2A_ARN": agentcore_resources.get('security_a2a_arn', ''),
                     "COST_A2A_ARN": agentcore_resources.get('cost_a2a_arn', ''),

@@ -1665,17 +1665,17 @@ echo "✓ Wrote env_config.txt with A2A ARNs (bundled into container):"
 sed 's/=.*arn:.*/=arn:...truncated/' env_config.txt
 echo ""
 
-# Also write A2A ARNs to backend/.env for direct routing (bypasses Supervisor LLM hop)
+# Also write A2A ARNs to backend/.env for Supervisor-to-specialist routing.
 cd "$SCRIPT_DIR"
 if [ -f "backend/.env" ]; then
-  echo "Writing A2A specialist ARNs to backend/.env for direct routing..."
+  echo "Writing A2A specialist ARNs to backend/.env..."
   update_env_var "CLOUDWATCH_A2A_ARN" "$A2A_ARN_cloudwatch"
   update_env_var "SECURITY_A2A_ARN" "$A2A_ARN_security"
   update_env_var "COST_A2A_ARN" "$A2A_ARN_cost"
   update_env_var "ADVISOR_A2A_ARN" "$A2A_ARN_advisor"
   update_env_var "JIRA_A2A_ARN" "$A2A_ARN_jira"
   update_env_var "KNOWLEDGE_A2A_ARN" "$A2A_ARN_knowledge"
-  echo "✓ A2A specialist ARNs saved to backend/.env for direct routing"
+  echo "✓ A2A specialist ARNs saved to backend/.env"
   echo "  (ECS will pick these up on next deployment via CDK)"
 fi
 cd "$SCRIPT_DIR/agents/runtime"
@@ -1793,8 +1793,8 @@ echo ""
 
 cd "$SCRIPT_DIR"
 
-# Step 9.8: Re-deploy CDK Backend Stack with A2A ARNs for ECS direct routing
-echo -e "${YELLOW}[9.8/13] Updating ECS task definition with A2A ARNs for direct routing...${NC}"
+# Step 9.8: Re-deploy CDK Backend Stack with A2A ARNs for Supervisor routing
+echo -e "${YELLOW}[9.8/13] Updating ECS task definition with A2A specialist ARNs...${NC}"
 echo ""
 echo "CDK Step 5 ran before A2A runtimes existed — ECS env vars were empty."
 echo "Re-deploying backend stack with A2A ARNs as CDK context parameters."
@@ -1826,7 +1826,7 @@ cdk deploy MSPAssistantBackendStack --require-approval never \
   --context jira_a2a_arn="$A2A_ARN_jira" \
   --context knowledge_a2a_arn="$A2A_ARN_knowledge"
 
-echo "✓ ECS task definition updated with A2A ARNs"
+echo "✓ ECS task definition updated with A2A specialist ARNs"
 cd "$SCRIPT_DIR"
 echo ""
 

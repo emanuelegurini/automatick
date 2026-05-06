@@ -1,9 +1,9 @@
 """
-Direct A2A Router — bypasses Supervisor for known-domain queries.
+Direct A2A Router — optional specialist debug/test path.
 
-For queries where the domain is unambiguous (cost, cloudwatch, security, advisor),
-this client invokes the specialist A2A runtime directly, skipping the Supervisor
-LLM hop entirely. This saves 45-90s per request.
+The production architecture is Supervisor-first: the Supervisor chooses the
+specialist and invokes the A2A runtime. This client is kept for explicit
+debug/test flows where ENABLE_DIRECT_SPECIALIST_ROUTING=true.
 
 Context passing:
   Uses the SAME metadata JSON prefix pattern as a2a_client_helper.py:
@@ -13,8 +13,8 @@ Context passing:
   Credential injection in MCP servers is unaffected.
 
 Fallback:
-  If the specialist ARN is not configured, returns None so the caller
-  falls back to Supervisor routing.
+  If direct routing is disabled or the specialist ARN is not configured, returns
+  False/None so the caller can use Supervisor routing.
 """
 import os
 import json
@@ -27,6 +27,8 @@ from typing import Dict, Any, Optional
 from botocore.config import Config
 import boto3
 from botocore.exceptions import ClientError
+
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,11 @@ _direct_router_instance: Optional["DirectRouterClient"] = None
 _direct_router_lock = threading.Lock()
 
 
+def is_direct_routing_enabled() -> bool:
+    """Return True only when the explicit debug/test direct-routing flag is enabled."""
+    return bool(settings.ENABLE_DIRECT_SPECIALIST_ROUTING)
+
+
 def get_direct_router() -> "DirectRouterClient":
     """Return singleton DirectRouterClient."""
     global _direct_router_instance
@@ -60,8 +67,10 @@ def get_direct_router() -> "DirectRouterClient":
 
 class DirectRouterClient:
     """
-    Invokes A2A specialist runtimes directly from the backend,
-    bypassing the Supervisor LLM for known-domain queries.
+    Invokes A2A specialist runtimes directly from the backend.
+
+    This is intentionally disabled by default so the Supervisor remains the
+    decision point for normal user and Freshdesk flows.
     
     Uses the same invoke_agent_runtime API as AgentCoreClient but
     formats the payload as A2A JSON-RPC (same as a2a_client_helper.py).
@@ -84,17 +93,19 @@ class DirectRouterClient:
         )
 
     def can_route_directly(self, agent_hint: str) -> bool:
-        """Return True if a configured ARN exists for this agent hint.
+        """Return True if direct routing is enabled and an ARN exists.
 
         Args:
             agent_hint: Domain key — one of cloudwatch, security, cost, advisor,
                         jira, knowledge.
 
         Returns:
-            True if the corresponding env-var ARN was set at startup (non-empty
-            string); False if the ARN is missing, meaning the caller should fall
-            back to Supervisor routing.
+            True only when ENABLE_DIRECT_SPECIALIST_ROUTING=true and the
+            corresponding env-var ARN was set at startup. False means the caller
+            should use Supervisor routing.
         """
+        if not is_direct_routing_enabled():
+            return False
         arn = SPECIALIST_ARN_MAP.get(agent_hint, "")
         return bool(arn)
 

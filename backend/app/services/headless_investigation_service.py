@@ -432,24 +432,12 @@ Proposed action
 The proposed action must be a human-readable remediation proposal only. It must not imply that any AWS change has already been made."""
 
     async def run_investigation(self, incident: Incident) -> Dict[str, Any]:
-        """Invoke CloudWatch specialist when available, otherwise Supervisor."""
-        from app.core.direct_router import get_direct_router
-
+        """Invoke the Supervisor so it decides which specialist to use."""
         prompt = self.build_investigation_prompt(incident)
         session_id = _build_agentcore_session_id(incident.ticket_id)
-        direct_router = get_direct_router()
-
         result = None
-        if direct_router.can_route_directly("cloudwatch"):
-            result = await direct_router.invoke_specialist(
-                agent_key="cloudwatch",
-                prompt=prompt,
-                account_name=incident.account_name,
-                region=incident.region,
-                session_id=session_id,
-            )
 
-        if result is None and settings.SUPERVISOR_RUNTIME_ARN:
+        if settings.SUPERVISOR_RUNTIME_ARN:
             from app.core.agentcore_client import get_agentcore_client
 
             agentcore = get_agentcore_client(region=incident.region or settings.AWS_REGION)
@@ -458,6 +446,7 @@ The proposed action must be a human-readable remediation proposal only. It must 
                 payload={
                     "prompt": prompt,
                     "account_name": incident.account_name,
+                    "region": incident.region,
                     "workflow_enabled": False,
                     "full_automation": False,
                     "session_id": session_id,
@@ -469,9 +458,26 @@ The proposed action must be a human-readable remediation proposal only. It must 
                 },
                 session_id=session_id,
             )
+        else:
+            from app.core.direct_router import get_direct_router, is_direct_routing_enabled
+
+            if is_direct_routing_enabled():
+                logger.warning(
+                    "SUPERVISOR_RUNTIME_ARN is not configured; using direct CloudWatch "
+                    "fallback because ENABLE_DIRECT_SPECIALIST_ROUTING=true"
+                )
+                direct_router = get_direct_router()
+                if direct_router.can_route_directly("cloudwatch"):
+                    result = await direct_router.invoke_specialist(
+                        agent_key="cloudwatch",
+                        prompt=prompt,
+                        account_name=incident.account_name,
+                        region=incident.region,
+                        session_id=session_id,
+                    )
 
         if result is None:
-            raise RuntimeError("AgentCore investigation runtime is not configured")
+            raise RuntimeError("Supervisor investigation runtime is not configured")
 
         if isinstance(result, dict) and result.get("success") is False:
             raise RuntimeError("AgentCore investigation failed")
@@ -483,7 +489,7 @@ The proposed action must be a human-readable remediation proposal only. It must 
             raise RuntimeError("AgentCore investigation returned a JSON-RPC error")
 
         structured = structure_investigation_response(raw_response)
-        structured["agent_type"] = result.get("agent_type", "cloudwatch") if isinstance(result, dict) else "unknown"
+        structured["agent_type"] = result.get("agent_type", "supervisor") if isinstance(result, dict) else "unknown"
         return structured
 
     async def process_freshdesk_ticket(self, request_id: str, incident: Incident) -> None:
