@@ -8,6 +8,7 @@
 - `infrastructure/cdk/`: Python CDK app and stacks.
 - `frontend/src/`: Legacy optional React app; disabled by default for the headless Freshdesk MVP.
 - `runbooks/`, `diagrams/`, `scripts/`, `misc/`: operational docs, assets, helper scripts, and demo utilities.
+- `docs/`: Agent-readable knowledge-store index. Start at `docs/index.md`; keep `AGENTS.md` short and link to docs instead of expanding it into a manual.
 
 ## Build, Test, and Development Commands
 
@@ -16,8 +17,13 @@
 - `cd backend && uvicorn app.main:app --reload`: runs the FastAPI backend locally.
 - `cd backend && source .venv/bin/activate && python -m unittest discover -s tests`: runs focused backend unit tests.
 - `cd infrastructure/cdk && python3.11 -m pip install -r requirements.txt && cdk synth`: validates CDK synthesis.
+- `python3 scripts/lint-docs.py`: validates docs/runbook frontmatter, local links, required sections, and secret patterns.
 - `./deploy.sh --email admin@example.com --region us-east-1`: runs the default headless Freshdesk deployment flow.
 - `cd frontend && npm install && npm run build && npm run lint`: validates the optional legacy UI when `ENABLE_FRONTEND=true`.
+
+## Documentation & Knowledge Base
+
+Use `docs/index.md` as the documentation map and `runbooks/` for canonical operational runbooks. Every agent-facing Markdown file must include frontmatter with `owner`, `status`, `last_verified`, `source`, and `agent_targets`; runbooks also require `services` and `incident_types`. Sync internal docs to Bedrock KB with `python3 scripts/sync-runbooks.py --region us-east-1 --env-file backend/.env`.
 
 ## Coding Style & Naming Conventions
 

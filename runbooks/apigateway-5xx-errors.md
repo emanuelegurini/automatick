@@ -1,3 +1,13 @@
+---
+owner: platform
+status: verified
+last_verified: 2026-05-07
+source: internal-runbook
+agent_targets: [supervisor, cloudwatch, diagnostics, knowledge]
+services: [apigateway, cloudwatch, lambda]
+incident_types: [5xx_errors, backend_failures]
+---
+
 # API Gateway 5XX Error Rate Troubleshooting and Remediation
 
 ## Overview

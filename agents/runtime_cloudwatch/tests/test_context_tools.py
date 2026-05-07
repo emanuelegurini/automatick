@@ -362,6 +362,35 @@ class CloudWatchNovaWrapperTests(unittest.TestCase):
         self.assertIn('"aws_documentation"', result)
         self.assertEqual(self.client.calls[0]["name"], "aws-knowledge-mcp___search_aws_docs")
 
+    def test_optional_internal_runbooks_wrapper_is_exposed_when_knowledge_tool_exists(self):
+        self.client = FakeMCPClient(
+            result_text=json.dumps(
+                {
+                    "success": True,
+                    "query": "EC2 high CPU",
+                    "results": [
+                        {
+                            "score": 0.82,
+                            "source_uri": "s3://kb/runbooks/ec2-high-cpu.md",
+                            "content": "Use CloudWatch metrics and SSM process evidence.",
+                        }
+                    ],
+                }
+            )
+        )
+        wrappers = self._create_wrappers(
+            [
+                "aws-api-mcp___call_aws",
+                "aws-knowledge-mcp___search_internal_runbooks",
+            ]
+        )
+
+        result = wrappers["search_internal_runbooks"]("EC2 high CPU")
+
+        self.assertIn('"internal_runbooks"', result)
+        self.assertIn("ec2-high-cpu.md", result)
+        self.assertEqual(self.client.calls[0]["name"], "aws-knowledge-mcp___search_internal_runbooks")
+
     def test_alarm_details_returns_compact_summary_not_raw_alarm_payload(self):
         raw_alarm_payload = {
             "response": {

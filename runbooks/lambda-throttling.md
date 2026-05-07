@@ -1,3 +1,13 @@
+---
+owner: platform
+status: verified
+last_verified: 2026-05-07
+source: internal-runbook
+agent_targets: [supervisor, cloudwatch, diagnostics, knowledge]
+services: [lambda, cloudwatch]
+incident_types: [throttling, concurrency_pressure]
+---
+
 # Lambda Function Throttling Troubleshooting and Remediation
 
 ## Overview

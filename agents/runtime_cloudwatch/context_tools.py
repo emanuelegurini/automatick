@@ -481,6 +481,41 @@ def _summarize_aws_docs(raw_text):
     return _json_dumps({"aws_documentation": compact, "shown": len(compact)})
 
 
+def _summarize_internal_runbooks(raw_text):
+    payload = _extract_aws_api_json(raw_text)
+    if not payload:
+        try:
+            payload = json.loads(raw_text)
+        except (TypeError, json.JSONDecodeError):
+            return _limit_text(raw_text)
+
+    results = payload.get("results") if isinstance(payload, dict) else []
+    if not isinstance(results, list):
+        results = []
+
+    compact = []
+    for result in results[:5]:
+        if not isinstance(result, dict):
+            compact.append({"content": _limit_text(result, 500)})
+            continue
+        compact.append(
+            {
+                "source_uri": result.get("source_uri") or result.get("uri"),
+                "score": result.get("score"),
+                "content": _limit_text(result.get("content") or result.get("text"), 700),
+            }
+        )
+
+    return _json_dumps(
+        {
+            "internal_runbooks": compact,
+            "shown": len(compact),
+            "source": "Bedrock Knowledge Base internal docs",
+            "query": payload.get("query") if isinstance(payload, dict) else None,
+        }
+    )
+
+
 def _extract_aws_api_json(raw_text):
     """Extract the nested AWS CLI JSON payload from aws-api-mcp output."""
     try:
@@ -767,6 +802,11 @@ def _create_nova_wrapper_tools(mcp_client, mcp_tools):
     }
     active_alarms_tool = "cloudwatch-mcp___get_active_alarms"
     aws_api_tool = "aws-api-mcp___call_aws" if "aws-api-mcp___call_aws" in tool_names else ""
+    internal_docs_tool = (
+        "aws-knowledge-mcp___search_internal_runbooks"
+        if "aws-knowledge-mcp___search_internal_runbooks" in tool_names
+        else ""
+    )
     aws_docs_tool = "aws-knowledge-mcp___search_aws_docs" if "aws-knowledge-mcp___search_aws_docs" in tool_names else ""
     if active_alarms_tool not in tool_names and not aws_api_tool:
         logger.warning(
@@ -1113,6 +1153,43 @@ def _create_nova_wrapper_tools(mcp_client, mcp_tools):
         search_log_events,
         search_incident_history,
     ]
+    if internal_docs_tool:
+        @tool(
+            name="search_internal_runbooks",
+            description=(
+                "Read-only internal documentation tool. Searches Automatick runbooks "
+                "and docs in the Bedrock Knowledge Base for MSP-specific investigation "
+                "and remediation guidance."
+            ),
+        )
+        def search_internal_runbooks(query: str, max_results: int = 5, min_score: float = 0.25) -> str:
+            """Search internal Automatick docs/runbooks.
+
+            Args:
+                query: Focused incident query, including service, metric, resource, and symptom.
+                max_results: Maximum results, clamped to 1..10.
+                min_score: Minimum relevance score, clamped to 0.0..1.0.
+            """
+            logger.info("Wrapper tool call intercepted: search_internal_runbooks")
+            if not str(query or "").strip():
+                return "MCP tool error: query is required."
+            try:
+                bounded_score = max(0.0, min(float(min_score), 1.0))
+            except (TypeError, ValueError):
+                bounded_score = 0.25
+            raw_result = _call_mcp_tool(
+                mcp_client,
+                internal_docs_tool,
+                {
+                    "query": str(query).strip(),
+                    "max_results": _clamp_int(max_results, default=5, minimum=1, maximum=10),
+                    "min_score": bounded_score,
+                },
+            )
+            return _summarize_internal_runbooks(raw_result)
+
+        wrapper_tools.append(search_internal_runbooks)
+
     if aws_docs_tool:
         @tool(
             name="search_aws_docs",
@@ -1152,7 +1229,7 @@ def _create_nova_wrapper_tools(mcp_client, mcp_tools):
     logger.info(
         "Using Nova wrapper tools: exposed=%s, backing_mcp_tools=%s",
         [wrapped.tool_name for wrapped in wrapper_tools],
-        sorted(name for name in [active_alarms_tool, aws_api_tool, aws_docs_tool] if name),
+        sorted(name for name in [active_alarms_tool, aws_api_tool, internal_docs_tool, aws_docs_tool] if name),
     )
     return wrapper_tools
 

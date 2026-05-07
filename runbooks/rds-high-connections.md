@@ -1,3 +1,13 @@
+---
+owner: platform
+status: verified
+last_verified: 2026-05-07
+source: internal-runbook
+agent_targets: [supervisor, cloudwatch, diagnostics, knowledge]
+services: [rds, cloudwatch]
+incident_types: [high_connections, database_saturation]
+---
+
 # RDS High Database Connections Troubleshooting and Remediation
 
 ## Overview

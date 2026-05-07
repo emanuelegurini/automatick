@@ -1,3 +1,13 @@
+---
+owner: platform
+status: verified
+last_verified: 2026-05-07
+source: internal-test-plan
+agent_targets: [cloudwatch, supervisor]
+services: [cloudwatch, bedrock-agentcore]
+incident_types: [agent_tool_use, validation]
+---
+
 # CloudWatch Specialist Agent Test Plan
 
 ## Objective

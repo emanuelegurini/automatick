@@ -1,3 +1,13 @@
+---
+owner: platform
+status: verified
+last_verified: 2026-05-07
+source: internal-runbook
+agent_targets: [supervisor, cloudwatch, diagnostics, knowledge]
+services: [ecs, cloudwatch, ecr]
+incident_types: [task_failures, service_degradation]
+---
+
 # ECS Service Task Failures Troubleshooting and Remediation
 
 ## Overview

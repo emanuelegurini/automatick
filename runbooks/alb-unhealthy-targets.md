@@ -1,3 +1,13 @@
+---
+owner: platform
+status: verified
+last_verified: 2026-05-07
+source: internal-runbook
+agent_targets: [supervisor, cloudwatch, diagnostics, knowledge]
+services: [alb, cloudwatch, ec2]
+incident_types: [unhealthy_targets, load_balancer_degradation]
+---
+
 # ALB Unhealthy Target Count Troubleshooting and Remediation
 
 ## Overview

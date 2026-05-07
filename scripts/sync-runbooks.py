@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-"""Sync local runbooks to the Bedrock Knowledge Base S3 data source and trigger re-ingestion.
+"""Sync local knowledge docs to the Bedrock Knowledge Base S3 data source.
 
 This script is the operational tool for keeping the Bedrock Knowledge Base used by the
-MSP Ops Automation platform up to date with the latest runbook content from the local
-``runbooks/`` directory.
+MSP Ops Automation platform up to date with the latest documentation content from the
+local ``docs/`` and ``runbooks/`` directories.
 
 Workflow:
   1. Resolve the target Knowledge Base ID from ``--kb-id`` or the ``backend/.env`` file.
   2. Discover the S3 data source bucket attached to the Knowledge Base.
-  3. Diff each local ``.md`` file against its S3 counterpart using MD5/ETag comparison.
-  4. Upload only new or changed files (or all files with ``--force``).
-  5. If any files were uploaded, start a Bedrock ingestion job to re-index the KB.
-  6. Poll the ingestion job until COMPLETE or FAILED (unless ``--no-wait`` is set).
+  3. Discover Markdown files in the configured local knowledge directories.
+  4. Diff each local ``.md`` file against its S3 counterpart using MD5/ETag comparison.
+  5. Upload only new or changed files (or all files with ``--force``).
+  6. If any files were uploaded, start a Bedrock ingestion job to re-index the KB.
+  7. Poll the ingestion job until COMPLETE or FAILED (unless ``--no-wait`` is set).
 
 Assumptions:
-  - Runbooks live in ``<repo_root>/runbooks/`` as ``.md`` files.
+  - Knowledge documents live in ``<repo_root>/docs/`` and ``<repo_root>/runbooks/``.
   - The KB has exactly one S3 data source; additional data sources are ignored.
   - S3 ETag for single-part uploads equals the MD5 of the file content, which is
-    valid for files below the multipart threshold (~8 MB).  Larger runbooks would
+    valid for files below the multipart threshold (~8 MB). Larger documents would
     require a different comparison strategy.
   - The caller's AWS credentials must have s3:PutObject on the bucket,
     bedrock-agent:StartIngestionJob on the KB, and bedrock-agent:GetIngestionJob
@@ -26,6 +27,7 @@ Assumptions:
 Usage:
     python scripts/sync-runbooks.py [--force] [--no-wait] [--region us-east-1]
                                     [--env-file backend/.env] [--kb-id <KB_ID>]
+                                    [--include-dir docs --include-dir runbooks]
 """
 
 import argparse
@@ -33,9 +35,19 @@ import hashlib
 import os
 import sys
 import time
+from pathlib import Path
 
-import boto3
-from botocore.exceptions import ClientError
+try:
+    import boto3
+    from botocore.exceptions import ClientError
+except ModuleNotFoundError:
+    boto3 = None
+
+    class ClientError(Exception):
+        """Fallback so --help works when boto3 is not installed locally."""
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_KNOWLEDGE_DIRS = ("docs", "runbooks")
 
 
 def load_env_file(env_file):
@@ -75,6 +87,23 @@ def compute_md5(file_path):
         return hashlib.md5(f.read(), usedforsecurity=False).hexdigest()
 
 
+def collect_markdown_files(include_dirs):
+    """Return sorted (absolute_path, repo_relative_s3_key) pairs for Markdown docs."""
+    discovered = []
+    for include_dir in include_dirs:
+        root = (REPO_ROOT / include_dir).resolve()
+        if not root.exists():
+            print(f"  [missing] {include_dir}/")
+            continue
+        if not root.is_dir():
+            print(f"  [skipped] {include_dir} is not a directory")
+            continue
+        for path in sorted(root.rglob("*.md")):
+            if path.is_file():
+                discovered.append((path, path.relative_to(REPO_ROOT).as_posix()))
+    return discovered
+
+
 def get_s3_etag(s3_client, bucket, key):
     """Return the S3 ETag (stripped of quotes) or None if the object doesn't exist."""
     try:
@@ -87,12 +116,12 @@ def get_s3_etag(s3_client, bucket, key):
 
 
 def sync_runbooks(args):
-    """Diff, upload, and ingest runbooks into the Bedrock Knowledge Base.
+    """Diff, upload, and ingest knowledge docs into the Bedrock Knowledge Base.
 
-    Orchestrates the full sync lifecycle: validates the KB, discovers its S3
-    data source, diffs local Markdown files against S3, uploads changed files,
-    and triggers a Bedrock ingestion job.  Polls the job to completion unless
-    ``args.no_wait`` is set.
+    Orchestrates the full sync lifecycle: validates the KB, discovers its S3 data
+    source, diffs local Markdown files from ``docs/`` and ``runbooks/`` against
+    S3, uploads changed files, and triggers a Bedrock ingestion job. Polls the
+    job to completion unless ``args.no_wait`` is set.
 
     Args:
         args: Parsed argparse.Namespace with the following attributes:
@@ -104,6 +133,9 @@ def sync_runbooks(args):
     kb_id = args.kb_id
     if not kb_id:
         print("Error: BEDROCK_KNOWLEDGE_BASE_ID is not set. Provide --kb-id or set it in the env file.")
+        sys.exit(1)
+    if boto3 is None:
+        print("Error: boto3 is required to sync the Bedrock Knowledge Base. Install backend/CDK dependencies first.")
         sys.exit(1)
 
     session = boto3.Session(region_name=args.region)
@@ -127,27 +159,21 @@ def sync_runbooks(args):
 
     print(f"Data Source: {ds_id}")
     print(f"S3 Bucket: {bucket}")
+    if prefix:
+        print(f"Data Source inclusion prefix: {prefix}")
 
-    # Find local runbooks
-    runbooks_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "runbooks")
-    if not os.path.isdir(runbooks_dir):
-        print(f"Error: Runbooks directory not found: {runbooks_dir}")
+    local_files = collect_markdown_files(args.include_dir)
+    if not local_files:
+        print(f"No .md files found in: {', '.join(args.include_dir)}")
         sys.exit(1)
 
-    local_files = sorted(f for f in os.listdir(runbooks_dir) if f.endswith(".md"))
-    if not local_files:
-        print("No .md files found in runbooks/")
-        sys.exit(0)
-
-    print(f"Found {len(local_files)} local runbook(s)\n")
+    print(f"Found {len(local_files)} local knowledge document(s)\n")
 
     # Diff and upload
     new, updated, unchanged, failed = 0, 0, 0, 0
     uploaded_any = False
 
-    for filename in local_files:
-        local_path = os.path.join(runbooks_dir, filename)
-        s3_key = f"runbooks/{filename}"
+    for local_path, s3_key in local_files:
         local_md5 = compute_md5(local_path)
 
         if not args.force:
@@ -163,14 +189,14 @@ def sync_runbooks(args):
         try:
             with open(local_path, "rb") as f:
                 s3.put_object(Bucket=bucket, Key=s3_key, Body=f.read(), ContentType="text/markdown")
-            print(f"  [{status}] {filename}")
+            print(f"  [{status}] {s3_key}")
             uploaded_any = True
             if status == "new":
                 new += 1
             else:
                 updated += 1
         except ClientError as e:
-            print(f"  [FAILED] {filename}: {e}")
+            print(f"  [FAILED] {s3_key}: {e}")
             failed += 1
 
     print(f"\nSummary: {new} new, {updated} updated, {unchanged} unchanged, {failed} failed")
@@ -233,14 +259,22 @@ def sync_runbooks(args):
 
 def main():
     """Parse CLI arguments, resolve KB ID from env file if needed, and run sync_runbooks."""
-    parser = argparse.ArgumentParser(description="Sync runbooks to Bedrock Knowledge Base S3 data source")
+    parser = argparse.ArgumentParser(description="Sync docs/runbooks to Bedrock Knowledge Base S3 data source")
     parser.add_argument("--no-wait", action="store_true", help="Don't wait for ingestion to complete")
     parser.add_argument("--force", action="store_true", help="Upload all files regardless of diff")
     parser.add_argument("--region", default="us-east-1", help="AWS region (default: us-east-1)")
     parser.add_argument("--env-file", default="backend/.env", help="Path to .env file (default: backend/.env)")
     parser.add_argument("--kb-id", default=None, help="Override KB ID (otherwise read from env file)")
+    parser.add_argument(
+        "--include-dir",
+        action="append",
+        default=None,
+        help="Knowledge directory to sync, relative to repo root. Repeatable. Defaults to docs and runbooks.",
+    )
 
     args = parser.parse_args()
+    if not args.include_dir:
+        args.include_dir = list(DEFAULT_KNOWLEDGE_DIRS)
 
     # Load KB ID from env file if not provided via CLI
     if not args.kb_id:

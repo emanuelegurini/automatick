@@ -1,3 +1,13 @@
+---
+owner: platform
+status: verified
+last_verified: 2026-05-07
+source: internal-runbook
+agent_targets: [supervisor, cloudwatch, diagnostics, knowledge]
+services: [ec2, cloudwatch, ssm]
+incident_types: [high_cpu, instance_degradation]
+---
+
 # EC2 High CPU Utilization Troubleshooting and Remediation
 
 ## Overview

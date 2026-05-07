@@ -1,3 +1,13 @@
+---
+owner: platform
+status: verified
+last_verified: 2026-05-07
+source: internal-runbook
+agent_targets: [supervisor, cloudwatch, security, knowledge]
+services: [s3, iam, kms, cloudwatch]
+incident_types: [access_denied, authorization_failure]
+---
+
 # S3 Access Denied (403) Errors Troubleshooting and Remediation
 
 ## Overview

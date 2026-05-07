@@ -1,3 +1,13 @@
+---
+owner: platform
+status: verified
+last_verified: 2026-05-07
+source: internal-test-plan
+agent_targets: [supervisor, cloudwatch, diagnostics, knowledge]
+services: [ec2, ssm, cloudwatch, sqlserver]
+incident_types: [high_cpu, database_workload, end_to_end_validation]
+---
+
 # SQL Server EC2 High CPU Test
 
 ## Purpose

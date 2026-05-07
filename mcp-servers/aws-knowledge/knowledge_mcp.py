@@ -8,6 +8,7 @@ documentation, code samples, knowledge about the regional availability of
 AWS APIs and CloudFormation resources, and other official AWS content."
 
 Tools (matching AWS Labs Knowledge MCP):
+- search_internal_runbooks  searches Automatick internal Bedrock KB docs/runbooks
 - search_aws_docs  maps to search_documentation
 - read_aws_doc  maps to read_documentation
 - get_regional_availability  maps to get_regional_availability
@@ -22,6 +23,8 @@ Transport: streamable-http (required by AgentCore Runtime)
 """
 from mcp.server.fastmcp import FastMCP
 import httpx
+import boto3
+import os
 from typing import Optional, List
 import logging
 
@@ -30,6 +33,27 @@ logging.basicConfig(level=logging.INFO)
 
 # Official AWS Knowledge MCP API endpoint (public, no auth required)
 KNOWLEDGE_API_URL = "https://knowledge-mcp.global.api.aws"
+AWS_REGION = os.getenv("AWS_REGION", os.getenv("REGION", "us-east-1"))
+BEDROCK_KNOWLEDGE_BASE_ID = os.getenv("BEDROCK_KNOWLEDGE_BASE_ID", "")
+
+
+def _load_env_config() -> None:
+    """Load optional deploy-time env_config.txt bundled with AgentCore runtime."""
+    config_path = os.path.join(os.path.dirname(__file__), "env_config.txt")
+    if not os.path.exists(config_path):
+        return
+    with open(config_path, encoding="utf-8") as config_file:
+        for raw_line in config_file:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            os.environ.setdefault(key.strip(), value.strip())
+
+
+_load_env_config()
+AWS_REGION = os.getenv("AWS_REGION", os.getenv("REGION", "us-east-1"))
+BEDROCK_KNOWLEDGE_BASE_ID = os.getenv("BEDROCK_KNOWLEDGE_BASE_ID", "")
 
 mcp = FastMCP(
     name="aws-knowledge-mcp",
@@ -66,6 +90,92 @@ def _call_knowledge_api(tool_name: str, arguments: dict, request_id: str = "req-
     )
     response.raise_for_status()
     return response.json()
+
+
+def _limit_text(value: object, max_chars: int = 3000) -> str:
+    text = str(value or "")
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + f"... [truncated {len(text) - max_chars} chars]"
+
+
+@mcp.tool()
+def search_internal_runbooks(
+    query: str,
+    max_results: int = 5,
+    min_score: float = 0.25,
+) -> dict:
+    """
+    Search Automatick internal runbooks and docs from the Bedrock Knowledge Base.
+
+    This is the preferred documentation source for MSP-specific investigation
+    flow, Freshdesk notes, remediation approval policy, tagging conventions,
+    and repeatable test procedures. Use official AWS docs for AWS service/API
+    semantics after checking internal runbooks.
+
+    Args:
+        query: Focused search query, for example "EC2 high CPU sqlservr CloudWatch".
+        max_results: Maximum results, clamped to 1..10.
+        min_score: Minimum Bedrock KB relevance score, clamped to 0.0..1.0.
+
+    Returns:
+        Dict with ranked internal runbook/doc results.
+    """
+    if not BEDROCK_KNOWLEDGE_BASE_ID:
+        return {
+            "success": False,
+            "error": "BEDROCK_KNOWLEDGE_BASE_ID is not configured for internal runbook search.",
+            "source": "Bedrock Knowledge Base",
+        }
+    if not str(query or "").strip():
+        return {"success": False, "error": "query is required", "source": "Bedrock Knowledge Base"}
+
+    try:
+        bounded_results = max(1, min(int(max_results or 5), 10))
+    except (TypeError, ValueError):
+        bounded_results = 5
+    try:
+        bounded_score = max(0.0, min(float(min_score), 1.0))
+    except (TypeError, ValueError):
+        bounded_score = 0.25
+
+    try:
+        client = boto3.client("bedrock-agent-runtime", region_name=AWS_REGION)
+        response = client.retrieve(
+            knowledgeBaseId=BEDROCK_KNOWLEDGE_BASE_ID,
+            retrievalQuery={"text": str(query).strip()},
+            retrievalConfiguration={
+                "vectorSearchConfiguration": {"numberOfResults": bounded_results}
+            },
+        )
+
+        results = []
+        for item in response.get("retrievalResults", []):
+            score = float(item.get("score", 0.0))
+            if score < bounded_score:
+                continue
+            location = item.get("location", {})
+            s3_location = location.get("s3Location", {}) if isinstance(location, dict) else {}
+            results.append(
+                {
+                    "score": score,
+                    "content": _limit_text(item.get("content", {}).get("text", ""), 3000),
+                    "source_uri": s3_location.get("uri", ""),
+                }
+            )
+
+        return {
+            "success": True,
+            "query": str(query).strip(),
+            "knowledge_base_id": BEDROCK_KNOWLEDGE_BASE_ID,
+            "min_score": bounded_score,
+            "results": results,
+            "source": "Bedrock Knowledge Base internal docs",
+        }
+
+    except Exception as e:
+        logger.error(f"Error searching internal runbooks: {e}")
+        return {"success": False, "error": str(e), "error_type": type(e).__name__}
 
 
 @mcp.tool()

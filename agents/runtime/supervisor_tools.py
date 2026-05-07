@@ -99,8 +99,10 @@ def check_cloudwatch(prompt: str) -> str:
         f"{prompt}\n\n"
         "If this is an incident, ticket, alarm, or resource symptom investigation, "
         "call search_incident_history with any known resource ID, alarm name, metric, "
-        "keywords, and ticket ID. Include an Incident history bullet in the final answer "
-        "with the recurrence classification and relevant ticket IDs."
+        "keywords, and ticket ID. Then search_internal_runbooks with a focused "
+        "service/metric/resource query when the tool is available, and use search_aws_docs "
+        "when internal docs are missing, insufficient, or AWS behavior needs confirmation. "
+        "Include Incident history and Documentation bullets in the final answer."
     )
     return send_to_agent_sync("cloudwatch", augmented_prompt, account_name, region)
 
@@ -237,9 +239,9 @@ def manage_jira(prompt: str) -> str:
 
 @tool
 def search_knowledge(prompt: str) -> str:
-    """Search AWS knowledge base for troubleshooting and documentation.
+    """Search internal runbooks and official AWS docs for troubleshooting guidance.
     
-    Use for: troubleshooting guides, how-to, AWS documentation.
+    Use for: internal runbooks, troubleshooting guides, how-to, AWS documentation.
     
     Args:
         prompt: What to search (e.g., "How to resolve high CPU on EC2")

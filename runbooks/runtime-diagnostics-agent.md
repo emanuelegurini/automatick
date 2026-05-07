@@ -1,3 +1,13 @@
+---
+owner: platform
+status: verified
+last_verified: 2026-05-07
+source: internal-test-plan
+agent_targets: [diagnostics, supervisor]
+services: [ec2, ssm, ecs, rds]
+incident_types: [runtime_diagnostics, in_instance_investigation]
+---
+
 # Runtime Diagnostics Agent Runbook
 
 ## Purpose

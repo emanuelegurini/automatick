@@ -1,3 +1,13 @@
+---
+owner: platform
+status: verified
+last_verified: 2026-05-07
+source: internal-test-history
+agent_targets: [supervisor, cloudwatch, diagnostics, knowledge]
+services: [freshdesk, ec2, ssm, cloudwatch, sqlserver]
+incident_types: [historical_validation, end_to_end_validation]
+---
+
 # Automatick Test History
 
 This file is the persistent historical log for reproducible Automatick tests.

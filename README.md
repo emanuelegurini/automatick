@@ -13,6 +13,7 @@ Automatick receives Freshdesk tickets, investigates AWS evidence through Amazon 
 - Posts a Freshdesk private note with root cause hypothesis, evidence, proposed fix, risk/impact, and approval requirement
 - Stores request results and pending remediation proposals in DynamoDB
 - Records approval state only (`pending -> approved`); no AWS write action is run
+- Searches versioned internal docs/runbooks before falling back to official AWS documentation when documentation evidence is needed
 
 ## Architecture
 
@@ -88,7 +89,7 @@ Optional:
 
 | Variable | Description |
 | --- | --- |
-| `BEDROCK_KNOWLEDGE_BASE_ID` | Enables knowledge-base lookup |
+| `BEDROCK_KNOWLEDGE_BASE_ID` | Enables internal docs/runbook lookup through Bedrock Knowledge Base |
 | `ENABLE_FRONTEND=true` | Deploys the legacy React operator UI |
 | `ENABLE_JIRA=true` | Deploys Jira specialist runtime and Gateway target |
 
@@ -136,6 +137,12 @@ python3.11 -m pip install -r requirements.txt
 ENABLE_FRONTEND=false ENABLE_JIRA=false ENABLE_FRESHDESK=true cdk synth
 ```
 
+Documentation knowledge-store check:
+
+```bash
+python3 scripts/lint-docs.py
+```
+
 ## Project Structure
 
 ```text
@@ -145,6 +152,8 @@ backend/app/services/headless_investigation_service.py
                                                    Freshdesk normalization, AgentCore investigation, remediation state
 agents/                                          Supervisor and specialist AgentCore runtimes
 mcp-servers/                                     CloudWatch, AWS API, and knowledge MCP servers
+docs/                                            Agent-readable documentation map
+runbooks/                                        Canonical internal operational runbooks
 infrastructure/cdk/                              CDK app and stacks
 scripts/                                         Validation and helper scripts
 ```
