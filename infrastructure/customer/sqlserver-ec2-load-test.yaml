@@ -1,0 +1,585 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Automatick runtime diagnostics load test: EC2 with SQL Server container, sample workload, SSM controls, and CPU alarm."
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC for the SQL Server load-test EC2 instance.
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Subnet with outbound access to SSM, Microsoft Container Registry, Docker Hub, and PyPI.
+  InstanceType:
+    Type: String
+    Default: t3.large
+    AllowedValues:
+      - t3.medium
+      - t3.large
+      - t3.xlarge
+      - m6i.large
+      - m6i.xlarge
+    Description: EC2 instance type. SQL Server containers need at least 2 GiB RAM; t3.large is the recommended default for this test.
+  RootVolumeSizeGiB:
+    Type: Number
+    Default: 50
+    MinValue: 40
+    MaxValue: 200
+    Description: Root EBS volume size for container images and generated sample data.
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Amazon Linux 2023 AMI SSM parameter.
+  KeyName:
+    Type: String
+    Default: ""
+    Description: Optional EC2 key pair name. Leave empty for SSM-only access.
+  SqlServerImageTag:
+    Type: String
+    Default: 2022-latest
+    Description: Microsoft SQL Server container image tag from mcr.microsoft.com/mssql/server.
+  CpuAlarmThresholdPercent:
+    Type: Number
+    Default: 60
+    MinValue: 1
+    MaxValue: 100
+    Description: EC2 CPUUtilization alarm threshold used to trigger the investigation window.
+  AlarmSnsTopicArn:
+    Type: String
+    Default: ""
+    Description: Optional SNS topic ARN for alarm actions. Leave empty for manual Freshdesk ticket creation.
+  ProjectTagValue:
+    Type: String
+    Default: mps-ops-utomation-poc
+    Description: Value for the project governance tag.
+  OwnerTagValue:
+    Type: String
+    Default: simone.ferraro
+    Description: Owner governance tag value. Uses the project-standard lowercase owner key.
+  EnvironmentTagValue:
+    Type: String
+    Default: test
+    Description: Environment tag value.
+  ServiceTagValue:
+    Type: String
+    Default: runtime-diagnostics
+    Description: Service tag value.
+  CustomerTagValue:
+    Type: String
+    Default: runtime-test
+    Description: Customer/account-context tag value for the test target.
+
+Conditions:
+  HasKeyName: !Not [!Equals [!Ref KeyName, ""]]
+  HasAlarmSnsTopic: !Not [!Equals [!Ref AlarmSnsTopicArn, ""]]
+
+Resources:
+  SqlServerLoadTestInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - Key: project
+          Value: !Ref ProjectTagValue
+        - Key: owner
+          Value: !Ref OwnerTagValue
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Environment
+          Value: !Ref EnvironmentTagValue
+        - Key: Service
+          Value: !Ref ServiceTagValue
+        - Key: Customer
+          Value: !Ref CustomerTagValue
+        - Key: Workload
+          Value: sqlserver-high-cpu
+
+  SqlServerLoadTestInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref SqlServerLoadTestInstanceRole
+
+  SqlServerLoadTestSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Automatick SQL Server EC2 load-test target. No inbound access required for SSM.
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: automatick-sqlserver-load-test-sg
+        - Key: project
+          Value: !Ref ProjectTagValue
+        - Key: owner
+          Value: !Ref OwnerTagValue
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Environment
+          Value: !Ref EnvironmentTagValue
+        - Key: Service
+          Value: !Ref ServiceTagValue
+        - Key: Customer
+          Value: !Ref CustomerTagValue
+        - Key: Workload
+          Value: sqlserver-high-cpu
+
+  SqlServerLoadTestInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      Monitoring: true
+      IamInstanceProfile: !Ref SqlServerLoadTestInstanceProfile
+      KeyName: !If [HasKeyName, !Ref KeyName, !Ref AWS::NoValue]
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          SubnetId: !Ref SubnetId
+          GroupSet:
+            - !Ref SqlServerLoadTestSecurityGroup
+          AssociatePublicIpAddress: true
+      PropagateTagsToVolumeOnCreation: true
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: !Ref RootVolumeSizeGiB
+            VolumeType: gp3
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          exec > >(tee -a /var/log/automatick-sqlserver-load-test.log) 2>&1
+
+          ROOT=/opt/automatick-sqlserver
+          PASS_FILE=$ROOT/sa-password
+          SQL_IMAGE=mcr.microsoft.com/mssql/server:${SqlServerImageTag}
+          mkdir -p "$ROOT"
+          chmod 700 "$ROOT"
+
+          dnf install -y docker amazon-ssm-agent python3 openssl || true
+          systemctl enable amazon-ssm-agent || true
+          systemctl start amazon-ssm-agent || true
+          systemctl enable docker
+          systemctl start docker
+
+          if [ ! -f "$PASS_FILE" ]; then
+            python3 - <<'PY' > "$PASS_FILE"
+          import secrets, string
+          alphabet = string.ascii_letters + string.digits
+          print("A1!" + "".join(secrets.choice(alphabet) for _ in range(29)))
+          PY
+            chmod 600 "$PASS_FILE"
+          fi
+          SA_PASSWORD=$(cat "$PASS_FILE")
+
+          docker network inspect automatick-sql >/dev/null 2>&1 || docker network create automatick-sql
+          if ! docker ps -a --format '{{.Names}}' | grep -qx automatick-sqlserver; then
+            docker pull "$SQL_IMAGE"
+            docker run -d \
+              --name automatick-sqlserver \
+              --hostname automatick-sqlserver \
+              --network automatick-sql \
+              --restart unless-stopped \
+              -e ACCEPT_EULA=Y \
+              -e MSSQL_PID=Developer \
+              -e MSSQL_SA_PASSWORD="$SA_PASSWORD" \
+              -p 127.0.0.1:1433:1433 \
+              "$SQL_IMAGE"
+          else
+            docker start automatick-sqlserver || true
+          fi
+
+          cat > "$ROOT/workload.py" <<'PY'
+          import argparse, os, sys, threading, time
+          import pymssql
+
+          DB = "AutomatickLoadTest"
+          PASSWORD = os.environ["DB_PASSWORD"]
+          SERVER = os.getenv("DB_HOST", "automatick-sqlserver")
+
+          def connect(database="master", timeout=120):
+              return pymssql.connect(
+                  server=SERVER,
+                  user="sa",
+                  password=PASSWORD,
+                  database=database,
+                  login_timeout=15,
+                  timeout=timeout,
+                  autocommit=True,
+              )
+
+          def run_sql(database, sql, timeout=300):
+              with connect(database, timeout=timeout) as conn:
+                  with conn.cursor() as cur:
+                      cur.execute(sql)
+                      while cur.nextset():
+                          pass
+
+          def wait_ready():
+              deadline = time.time() + 900
+              while time.time() < deadline:
+                  try:
+                      run_sql("master", "SELECT 1", timeout=20)
+                      return
+                  except Exception as exc:
+                      print(f"waiting for SQL Server: {exc}", flush=True)
+                      time.sleep(5)
+              raise RuntimeError("SQL Server did not become ready")
+
+          def init_db():
+              wait_ready()
+              run_sql("master", f"IF DB_ID('{DB}') IS NULL CREATE DATABASE {DB};", timeout=120)
+              run_sql(DB, """
+          SET NOCOUNT ON;
+          IF OBJECT_ID('dbo.Regions','U') IS NULL
+          BEGIN
+            CREATE TABLE dbo.Regions(RegionId int NOT NULL PRIMARY KEY, RegionName varchar(40) NOT NULL);
+            CREATE TABLE dbo.Customers(CustomerId int NOT NULL PRIMARY KEY, RegionId int NOT NULL, CustomerName varchar(80) NOT NULL, Segment varchar(20) NOT NULL);
+            CREATE TABLE dbo.Suppliers(SupplierId int NOT NULL PRIMARY KEY, SupplierName varchar(80) NOT NULL, RegionId int NOT NULL);
+            CREATE TABLE dbo.Products(ProductId int NOT NULL PRIMARY KEY, SupplierId int NOT NULL, ProductName varchar(80) NOT NULL, CategoryId int NOT NULL, UnitCost decimal(10,2) NOT NULL);
+            CREATE TABLE dbo.Orders(OrderId int NOT NULL PRIMARY KEY, CustomerId int NOT NULL, OrderDate datetime2 NOT NULL, StatusCode int NOT NULL);
+            CREATE TABLE dbo.OrderItems(OrderItemId bigint NOT NULL PRIMARY KEY, OrderId int NOT NULL, ProductId int NOT NULL, Quantity int NOT NULL, UnitPrice decimal(10,2) NOT NULL);
+            CREATE TABLE dbo.Payments(PaymentId int NOT NULL PRIMARY KEY, OrderId int NOT NULL, Amount decimal(12,2) NOT NULL, PaymentMethod varchar(20) NOT NULL);
+            CREATE TABLE dbo.Shipments(ShipmentId int NOT NULL PRIMARY KEY, OrderId int NOT NULL, Carrier varchar(30) NOT NULL, ShippedAt datetime2 NOT NULL);
+          END;
+          IF NOT EXISTS (SELECT 1 FROM dbo.Regions)
+            INSERT dbo.Regions SELECT v.n, CONCAT('region-', v.n) FROM (VALUES(1),(2),(3),(4),(5),(6),(7),(8),(9),(10)) v(n);
+          IF NOT EXISTS (SELECT 1 FROM dbo.Customers)
+          BEGIN
+            ;WITH n AS (SELECT TOP (10000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n FROM sys.all_objects a CROSS JOIN sys.all_objects b)
+            INSERT dbo.Customers SELECT n, (n % 10) + 1, CONCAT('customer-', n), CASE n % 4 WHEN 0 THEN 'enterprise' WHEN 1 THEN 'midmarket' WHEN 2 THEN 'smb' ELSE 'public' END FROM n;
+            ;WITH n AS (SELECT TOP (200) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n FROM sys.all_objects)
+            INSERT dbo.Suppliers SELECT n, CONCAT('supplier-', n), (n % 10) + 1 FROM n;
+            ;WITH n AS (SELECT TOP (2000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n FROM sys.all_objects a CROSS JOIN sys.all_objects b)
+            INSERT dbo.Products SELECT n, ((n * 7) % 200) + 1, CONCAT('product-', n), (n % 40) + 1, CAST(((n % 5000) + 100) / 10.0 AS decimal(10,2)) FROM n;
+            ;WITH n AS (SELECT TOP (50000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n FROM sys.all_objects a CROSS JOIN sys.all_objects b)
+            INSERT dbo.Orders SELECT n, ((n * 13) % 10000) + 1, DATEADD(minute, -n, SYSUTCDATETIME()), n % 6 FROM n;
+            ;WITH n AS (SELECT TOP (300000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n FROM sys.all_objects a CROSS JOIN sys.all_objects b CROSS JOIN sys.all_objects c)
+            INSERT dbo.OrderItems SELECT n, ((n * 11) % 50000) + 1, ((n * 7) % 2000) + 1, (n % 9) + 1, CAST(((n % 7000) + 250) / 10.0 AS decimal(10,2)) FROM n;
+            ;WITH n AS (SELECT TOP (50000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n FROM sys.all_objects a CROSS JOIN sys.all_objects b)
+            INSERT dbo.Payments SELECT n, n, CAST(((n % 90000) + 1000) / 10.0 AS decimal(12,2)), CASE n % 4 WHEN 0 THEN 'card' WHEN 1 THEN 'wire' WHEN 2 THEN 'ach' ELSE 'cash' END FROM n;
+            ;WITH n AS (SELECT TOP (50000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n FROM sys.all_objects a CROSS JOIN sys.all_objects b)
+            INSERT dbo.Shipments SELECT n, n, CASE n % 4 WHEN 0 THEN 'ups' WHEN 1 THEN 'fedex' WHEN 2 THEN 'dhl' ELSE 'postal' END, DATEADD(minute, -n, SYSUTCDATETIME()) FROM n;
+          END;
+          IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_Orders_Customer' AND object_id = OBJECT_ID('dbo.Orders'))
+            CREATE INDEX IX_Orders_Customer ON dbo.Orders(CustomerId);
+          IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_OrderItems_Order' AND object_id = OBJECT_ID('dbo.OrderItems'))
+            CREATE INDEX IX_OrderItems_Order ON dbo.OrderItems(OrderId);
+          IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_OrderItems_Product' AND object_id = OBJECT_ID('dbo.OrderItems'))
+            CREATE INDEX IX_OrderItems_Product ON dbo.OrderItems(ProductId);
+          IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_Products_Supplier' AND object_id = OBJECT_ID('dbo.Products'))
+            CREATE INDEX IX_Products_Supplier ON dbo.Products(SupplierId);
+              """, timeout=900)
+              print("sample database ready", flush=True)
+
+          HEAVY_QUERY = """
+          SET NOCOUNT ON;
+          SELECT SUM(CONVERT(bigint, CHECKSUM(CONVERT(varchar(64), HASHBYTES('SHA2_256',
+                   CONCAT(c.CustomerName, p.ProductName, s.SupplierName, pay.PaymentMethod,
+                          sh.Carrier, r.RegionName, r2.RegionName, oi.UnitPrice, o.OrderDate)), 2)))) AS cpu_hash
+          FROM dbo.Orders o
+          JOIN dbo.Customers c ON c.CustomerId = o.CustomerId
+          JOIN dbo.OrderItems oi ON oi.OrderId = o.OrderId
+          JOIN dbo.Products p ON p.ProductId = oi.ProductId
+          JOIN dbo.Suppliers s ON s.SupplierId = p.SupplierId
+          JOIN dbo.Payments pay ON pay.OrderId = o.OrderId
+          JOIN dbo.Shipments sh ON sh.OrderId = o.OrderId
+          JOIN dbo.Regions r ON r.RegionId = c.RegionId
+          CROSS JOIN dbo.Regions r2
+          WHERE o.StatusCode <> 5
+          OPTION (MAXDOP 0, RECOMPILE);
+          """
+
+          def worker(stop_at, idx):
+              count = 0
+              while time.time() < stop_at:
+                  try:
+                      run_sql(DB, HEAVY_QUERY, timeout=300)
+                      count += 1
+                      print(f"worker={idx} completed_queries={count}", flush=True)
+                  except Exception as exc:
+                      print(f"worker={idx} error={exc}", flush=True)
+                      time.sleep(2)
+
+          def run_load(duration, workers):
+              init_db()
+              stop_at = time.time() + duration
+              threads = [threading.Thread(target=worker, args=(stop_at, i), daemon=True) for i in range(workers)]
+              for thread in threads:
+                  thread.start()
+              while time.time() < stop_at:
+                  time.sleep(5)
+              for thread in threads:
+                  thread.join(timeout=10)
+
+          parser = argparse.ArgumentParser()
+          parser.add_argument("--init-only", action="store_true")
+          parser.add_argument("--duration", type=int, default=int(os.getenv("DURATION_SECONDS", "900")))
+          parser.add_argument("--workers", type=int, default=int(os.getenv("WORKERS", "4")))
+          args = parser.parse_args()
+          if args.init_only:
+              init_db()
+          else:
+              run_load(max(60, args.duration), max(1, args.workers))
+          PY
+
+          cat > "$ROOT/Dockerfile" <<'EOF'
+          FROM python:3.11-slim
+          RUN pip install --no-cache-dir pymssql
+          COPY workload.py /workload.py
+          ENTRYPOINT ["python", "/workload.py"]
+          EOF
+
+          docker build -t automatick/sqlserver-workload:local "$ROOT"
+
+          cat > "$ROOT/start-load.sh" <<'EOF'
+          #!/bin/bash
+          set -eo pipefail
+          ROOT=/opt/automatick-sqlserver
+          DURATION="$1"
+          WORKERS="$2"
+          if [ -z "$DURATION" ]; then DURATION=900; fi
+          if [ -z "$WORKERS" ]; then WORKERS=4; fi
+          PASS_FILE=$ROOT/sa-password
+          LOG_FILE=$ROOT/load.log
+          if docker ps --format '{{.Names}}' | grep -q '^automatick-sql-load'; then
+            echo "load already running"
+            exit 0
+          fi
+          SA_PASSWORD=$(cat "$PASS_FILE")
+          nohup docker run --rm \
+            --name "automatick-sql-load-$(date +%s)" \
+            --network automatick-sql \
+            -e DB_PASSWORD="$SA_PASSWORD" \
+            -e DURATION_SECONDS="$DURATION" \
+            -e WORKERS="$WORKERS" \
+            automatick/sqlserver-workload:local > "$LOG_FILE" 2>&1 &
+          echo $! > "$ROOT/load.pid"
+          echo "started SQL Server load for $DURATION seconds with $WORKERS workers"
+          EOF
+
+          cat > "$ROOT/stop-load.sh" <<'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          docker ps --format '{{.Names}}' | grep '^automatick-sql-load' | xargs -r docker rm -f
+          rm -f /opt/automatick-sqlserver/load.pid
+          echo "stopped SQL Server load containers"
+          EOF
+
+          cat > "$ROOT/status.sh" <<'EOF'
+          #!/bin/bash
+          set +e
+          ROOT=/opt/automatick-sqlserver
+          echo "### containers"
+          docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+          echo "### docker stats"
+          docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}' 2>/dev/null
+          echo "### top cpu"
+          ps -eo pid,ppid,user,comm,%cpu,%mem,etime --sort=-%cpu | head -20
+          echo "### load log"
+          tail -60 "$ROOT/load.log" 2>/dev/null
+          exit 0
+          EOF
+
+          chmod +x "$ROOT/start-load.sh" "$ROOT/stop-load.sh" "$ROOT/status.sh"
+          docker run --rm --network automatick-sql -e DB_PASSWORD="$SA_PASSWORD" automatick/sqlserver-workload:local --init-only || true
+      Tags:
+        - Key: Name
+          Value: automatick-sqlserver-load-test
+        - Key: project
+          Value: !Ref ProjectTagValue
+        - Key: owner
+          Value: !Ref OwnerTagValue
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Environment
+          Value: !Ref EnvironmentTagValue
+        - Key: Service
+          Value: !Ref ServiceTagValue
+        - Key: Customer
+          Value: !Ref CustomerTagValue
+        - Key: Workload
+          Value: sqlserver-high-cpu
+        - Key: AutomatickDiagnostics
+          Value: "true"
+
+  SqlServerHighCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-ec2-sqlserver-cpu-high"
+      AlarmDescription: !Sub "EC2 SQL Server load-test CPU is >= ${CpuAlarmThresholdPercent}% for two minutes. InstanceId=${SqlServerLoadTestInstance}."
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref SqlServerLoadTestInstance
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: !Ref CpuAlarmThresholdPercent
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasAlarmSnsTopic
+        - [!Ref AlarmSnsTopicArn]
+        - !Ref AWS::NoValue
+      Tags:
+        - Key: project
+          Value: !Ref ProjectTagValue
+        - Key: owner
+          Value: !Ref OwnerTagValue
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Environment
+          Value: !Ref EnvironmentTagValue
+        - Key: Service
+          Value: !Ref ServiceTagValue
+        - Key: Customer
+          Value: !Ref CustomerTagValue
+        - Key: Workload
+          Value: sqlserver-high-cpu
+
+  StartSqlServerLoadDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Sub "${AWS::StackName}-start-sqlserver-load"
+      DocumentType: Command
+      DocumentFormat: YAML
+      TargetType: /AWS::EC2::Instance
+      UpdateMethod: NewVersion
+      Content:
+        schemaVersion: "2.2"
+        description: "Start the Automatick SQL Server CPU load workload."
+        parameters:
+          DurationSeconds:
+            type: String
+            default: "900"
+            description: "How long the workload should run."
+          Workers:
+            type: String
+            default: "4"
+            description: "Number of concurrent query workers."
+        mainSteps:
+          - action: aws:runShellScript
+            name: startLoad
+            inputs:
+              timeoutSeconds: "120"
+              runCommand:
+                - "/opt/automatick-sqlserver/start-load.sh {{ DurationSeconds }} {{ Workers }}"
+      Tags:
+        - Key: project
+          Value: !Ref ProjectTagValue
+        - Key: owner
+          Value: !Ref OwnerTagValue
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Environment
+          Value: !Ref EnvironmentTagValue
+        - Key: Service
+          Value: !Ref ServiceTagValue
+        - Key: Customer
+          Value: !Ref CustomerTagValue
+        - Key: Workload
+          Value: sqlserver-high-cpu
+
+  StopSqlServerLoadDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Sub "${AWS::StackName}-stop-sqlserver-load"
+      DocumentType: Command
+      DocumentFormat: YAML
+      TargetType: /AWS::EC2::Instance
+      UpdateMethod: NewVersion
+      Content:
+        schemaVersion: "2.2"
+        description: "Stop the Automatick SQL Server CPU load workload."
+        mainSteps:
+          - action: aws:runShellScript
+            name: stopLoad
+            inputs:
+              timeoutSeconds: "120"
+              runCommand:
+                - "/opt/automatick-sqlserver/stop-load.sh"
+      Tags:
+        - Key: project
+          Value: !Ref ProjectTagValue
+        - Key: owner
+          Value: !Ref OwnerTagValue
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Environment
+          Value: !Ref EnvironmentTagValue
+        - Key: Service
+          Value: !Ref ServiceTagValue
+        - Key: Customer
+          Value: !Ref CustomerTagValue
+        - Key: Workload
+          Value: sqlserver-high-cpu
+
+  SqlServerLoadStatusDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Sub "${AWS::StackName}-sqlserver-load-status"
+      DocumentType: Command
+      DocumentFormat: YAML
+      TargetType: /AWS::EC2::Instance
+      UpdateMethod: NewVersion
+      Content:
+        schemaVersion: "2.2"
+        description: "Show SQL Server load-test container and host status."
+        mainSteps:
+          - action: aws:runShellScript
+            name: status
+            inputs:
+              timeoutSeconds: "120"
+              runCommand:
+                - "/opt/automatick-sqlserver/status.sh"
+      Tags:
+        - Key: project
+          Value: !Ref ProjectTagValue
+        - Key: owner
+          Value: !Ref OwnerTagValue
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Environment
+          Value: !Ref EnvironmentTagValue
+        - Key: Service
+          Value: !Ref ServiceTagValue
+        - Key: Customer
+          Value: !Ref CustomerTagValue
+        - Key: Workload
+          Value: sqlserver-high-cpu
+
+Outputs:
+  InstanceId:
+    Description: EC2 instance ID to put in the Freshdesk ticket and runtime diagnostics prompt.
+    Value: !Ref SqlServerLoadTestInstance
+  CpuAlarmName:
+    Description: CloudWatch CPU alarm name.
+    Value: !Ref SqlServerHighCpuAlarm
+  StartLoadDocumentName:
+    Description: SSM document that starts the SQL Server CPU workload.
+    Value: !Ref StartSqlServerLoadDocument
+  StopLoadDocumentName:
+    Description: SSM document that stops the SQL Server CPU workload.
+    Value: !Ref StopSqlServerLoadDocument
+  StatusDocumentName:
+    Description: SSM document that prints container, host, and workload status.
+    Value: !Ref SqlServerLoadStatusDocument
+  FreshdeskSubject:
+    Description: Suggested ticket subject.
+    Value: "SQL Server EC2 high CPU investigation"
+  FreshdeskDescription:
+    Description: Suggested ticket description.
+    Value: !Sub "CloudWatch alarm ${SqlServerHighCpuAlarm} is reporting CPU >= ${CpuAlarmThresholdPercent}% on EC2 instance ${SqlServerLoadTestInstance} in ${AWS::Region}. Please enter the machine, inspect CPU pressure, processes, and SQL Server container workload. Account name: runtime_test."

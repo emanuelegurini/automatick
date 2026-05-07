@@ -95,7 +95,14 @@ def check_cloudwatch(prompt: str) -> str:
     ctx = _current_context.get()
     account_name, region = ctx["account_name"], ctx["region"]
     logger.info(f"CloudWatch [{account_name}]: {prompt[:50]}...")
-    return send_to_agent_sync("cloudwatch", prompt, account_name, region)
+    augmented_prompt = (
+        f"{prompt}\n\n"
+        "If this is an incident, ticket, alarm, or resource symptom investigation, "
+        "call search_incident_history with any known resource ID, alarm name, metric, "
+        "keywords, and ticket ID. Include an Incident history bullet in the final answer "
+        "with the recurrence classification and relevant ticket IDs."
+    )
+    return send_to_agent_sync("cloudwatch", augmented_prompt, account_name, region)
 
 
 @tool

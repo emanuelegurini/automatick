@@ -129,8 +129,10 @@ class CloudWatchNovaWrapperTests(unittest.TestCase):
                 "get_active_alarms",
                 "get_alarm_details",
                 "get_metric_history",
+                "get_ec2_metric_history",
                 "list_log_groups",
                 "search_log_events",
+                "search_incident_history",
             },
         )
 
@@ -187,17 +189,34 @@ class CloudWatchNovaWrapperTests(unittest.TestCase):
         self.assertIn("--statistics Maximum", command)
         self.assertIn("--dimensions Name=ClusterName,Value=cluster-a Name=ServiceName,Value=service-a", command)
 
-    def test_get_metric_history_rejects_invalid_dimensions_json(self):
+    def test_get_metric_history_ignores_invalid_dimensions_json(self):
         wrappers = self._create_wrappers(["aws-api-mcp___call_aws"])
 
-        result = wrappers["get_metric_history"](
+        wrappers["get_metric_history"](
             namespace="AWS/ECS",
             metric_name="CPUUtilization",
             dimensions_json="not-json",
         )
 
-        self.assertIn("dimensions_json must be a JSON array", result)
-        self.assertEqual(self.client.calls, [])
+        command = self.client.calls[0]["arguments"]["cli_command"]
+        self.assertIn("aws cloudwatch get-metric-statistics", command)
+        self.assertNotIn("--dimensions", command)
+
+    def test_get_ec2_metric_history_builds_instance_dimension(self):
+        wrappers = self._create_wrappers(["aws-api-mcp___call_aws"])
+
+        wrappers["get_ec2_metric_history"](
+            instance_id="i-abc123",
+            metric_name="CPUUtilization",
+            minutes=30,
+            statistic="Maximum",
+        )
+
+        command = self.client.calls[0]["arguments"]["cli_command"]
+        self.assertIn("--namespace AWS/EC2", command)
+        self.assertIn("--metric-name CPUUtilization", command)
+        self.assertIn("--statistics Maximum", command)
+        self.assertIn("--dimensions Name=InstanceId,Value=i-abc123", command)
 
     def test_search_log_events_requires_log_group_name(self):
         wrappers = self._create_wrappers(["aws-api-mcp___call_aws"])
@@ -206,6 +225,142 @@ class CloudWatchNovaWrapperTests(unittest.TestCase):
 
         self.assertIn("log_group_name is required", result)
         self.assertEqual(self.client.calls, [])
+
+    def test_search_incident_history_scans_msp_ticket_history_with_default_credentials(self):
+        self.context_tools.set_context("runtime_test", "us-east-1")
+        raw_history_payload = {
+            "response": {
+                "json": json.dumps(
+                    {
+                        "Items": [
+                            {
+                                "request_id": {"S": "incident-history-111"},
+                                "record_type": {"S": "incident_history"},
+                                "ticket_id": {"S": "111"},
+                                "created_at": {"N": "1778080000"},
+                                "status": {"S": "complete"},
+                                "subject": {"S": "EC2 CPU alarm"},
+                                "account_name": {"S": "runtime_test"},
+                                "region": {"S": "us-east-1"},
+                                "resource_id": {"S": "i-abc123"},
+                                "investigation": {
+                                    "M": {
+                                        "root_cause_hypothesis": {"S": "sqlservr consumed CPU"},
+                                        "proposed_action": {"S": "Inspect SQL workload"},
+                                    }
+                                },
+                            }
+                        ],
+                        "ScannedCount": 1,
+                    }
+                )
+            }
+        }
+        self.client = FakeMCPClient(result_text=json.dumps(raw_history_payload))
+        wrappers = self._create_wrappers(["aws-api-mcp___call_aws"])
+
+        result = wrappers["search_incident_history"](
+            alarm_name="EC2 CPU alarm",
+            resource_id="i-abc123",
+            namespace="AWS/EC2",
+            metric_name="CPUUtilization",
+            keywords="sqlservr,cpu",
+            current_ticket_id="222",
+            lookback_days=90,
+        )
+
+        call = self.client.calls[0]
+        self.assertEqual(call["name"], "aws-api-mcp___call_aws")
+        self.assertEqual(call["arguments"]["account_name"], "default")
+        self.assertIn("aws dynamodb scan", call["arguments"]["cli_command"])
+        self.assertIn("msp-assistant-chat-requests", call["arguments"]["cli_command"])
+        self.assertIn('"classification": "sporadic_or_rare"', result)
+        self.assertIn('"ticket_id": "111"', result)
+        self.assertIn('"matched_on"', result)
+
+    def test_search_incident_history_classifies_multiple_matches_as_recurring(self):
+        now = 1778160000
+        raw_history_payload = {
+            "response": {
+                "json": json.dumps(
+                    {
+                        "Items": [
+                            {
+                                "request_id": {"S": "incident-history-111"},
+                                "record_type": {"S": "incident_history"},
+                                "ticket_id": {"S": "111"},
+                                "created_at": {"N": str(now)},
+                                "subject": {"S": "CPUUtilization high on i-abc123"},
+                                "account_name": {"S": "runtime_test"},
+                                "region": {"S": "us-east-1"},
+                                "resource_id": {"S": "i-abc123"},
+                            },
+                            {
+                                "request_id": {"S": "incident-history-112"},
+                                "record_type": {"S": "incident_history"},
+                                "ticket_id": {"S": "112"},
+                                "created_at": {"N": str(now - 3600)},
+                                "subject": {"S": "CPUUtilization high on i-abc123"},
+                                "account_name": {"S": "runtime_test"},
+                                "region": {"S": "us-east-1"},
+                                "resource_id": {"S": "i-abc123"},
+                            },
+                            {
+                                "request_id": {"S": "incident-history-113"},
+                                "record_type": {"S": "incident_history"},
+                                "ticket_id": {"S": "113"},
+                                "created_at": {"N": str(now - 7200)},
+                                "subject": {"S": "CPUUtilization high on i-abc123"},
+                                "account_name": {"S": "runtime_test"},
+                                "region": {"S": "us-east-1"},
+                                "resource_id": {"S": "i-abc123"},
+                            },
+                        ],
+                        "ScannedCount": 3,
+                    }
+                )
+            }
+        }
+
+        result = self.context_tools._summarize_incident_history(
+            json.dumps(raw_history_payload),
+            resource_id="i-abc123",
+            metric_name="CPUUtilization",
+            current_ticket_id="999",
+            customer_account_name="runtime_test",
+            region="us-east-1",
+            lookback_days=30,
+        )
+
+        self.assertIn('"classification": "frequent_recurring"', result)
+        self.assertIn('"matches_found": 3', result)
+
+    def test_optional_aws_docs_wrapper_is_exposed_when_knowledge_tool_exists(self):
+        self.client = FakeMCPClient(
+            result_text=json.dumps(
+                {
+                    "success": True,
+                    "results": [
+                        {
+                            "title": "Troubleshoot EC2 CPU",
+                            "url": "https://docs.aws.amazon.com/example",
+                            "context": "Use CloudWatch metrics and process-level evidence.",
+                        }
+                    ],
+                }
+            )
+        )
+        wrappers = self._create_wrappers(
+            [
+                "aws-api-mcp___call_aws",
+                "aws-knowledge-mcp___search_aws_docs",
+            ]
+        )
+
+        result = wrappers["search_aws_docs"]("EC2 CPUUtilization troubleshooting")
+
+        self.assertIn('"aws_documentation"', result)
+        self.assertEqual(self.client.calls[0]["name"], "aws-knowledge-mcp___search_aws_docs")
 
     def test_alarm_details_returns_compact_summary_not_raw_alarm_payload(self):
         raw_alarm_payload = {

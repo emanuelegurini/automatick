@@ -28,6 +28,7 @@ BEDROCK_STREAMING = os.getenv('BEDROCK_STREAMING', 'false').lower() in ('1', 'tr
 CLOUDWATCH_USE_WRAPPER_TOOLS = os.getenv(
     'CLOUDWATCH_USE_WRAPPER_TOOLS', 'true'
 ).lower() in ('1', 'true', 'yes', 'on')
+INCIDENT_HISTORY_TABLE = os.getenv("CHAT_REQUESTS_TABLE", "msp-assistant-chat-requests")
 CLOUDWATCH_TOOL_ALLOWLIST = {
     name.strip()
     for name in os.getenv('CLOUDWATCH_TOOL_ALLOWLIST', '').split(',')
@@ -185,6 +186,299 @@ def _limit_text(value, max_chars=8000):
 
 def _json_dumps(value):
     return json.dumps(value, indent=2, default=str)
+
+
+def _dynamodb_attr_to_python(value):
+    """Convert DynamoDB low-level AttributeValue JSON into plain Python values."""
+    if not isinstance(value, dict) or len(value) != 1:
+        return value
+
+    attr_type, attr_value = next(iter(value.items()))
+    if attr_type == "S":
+        return attr_value
+    if attr_type == "N":
+        number = str(attr_value)
+        try:
+            return int(number) if "." not in number else float(number)
+        except ValueError:
+            return number
+    if attr_type == "BOOL":
+        return bool(attr_value)
+    if attr_type == "NULL":
+        return None
+    if attr_type == "M":
+        return {
+            key: _dynamodb_attr_to_python(nested_value)
+            for key, nested_value in (attr_value or {}).items()
+        }
+    if attr_type == "L":
+        return [_dynamodb_attr_to_python(item) for item in (attr_value or [])]
+    if attr_type in {"SS", "NS"}:
+        return list(attr_value or [])
+    return attr_value
+
+
+def _normalize_dynamodb_item(item):
+    if not isinstance(item, dict):
+        return {}
+    if any(key in {"S", "N", "M", "L", "BOOL", "NULL"} for value in item.values() if isinstance(value, dict) for key in value):
+        return {key: _dynamodb_attr_to_python(value) for key, value in item.items()}
+    return item
+
+
+def _text_blob(*values):
+    return "\n".join(str(value or "") for value in values if value is not None).lower()
+
+
+def _epoch_to_iso(value):
+    try:
+        return datetime.fromtimestamp(int(value), tz=timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError):
+        return str(value or "")
+
+
+def _history_keywords(keywords):
+    if isinstance(keywords, str):
+        raw = keywords.replace(",", "\n").splitlines()
+    else:
+        raw = keywords or []
+    normalized = []
+    for item in raw:
+        value = str(item or "").strip().lower()
+        if len(value) >= 3 and value not in normalized:
+            normalized.append(value)
+    return normalized[:10]
+
+
+def _score_history_item(
+    item,
+    alarm_name="",
+    resource_id="",
+    namespace="",
+    metric_name="",
+    keywords="",
+    customer_account_name="",
+    region="",
+):
+    incident = item.get("incident") if isinstance(item.get("incident"), dict) else item
+    investigation = item.get("investigation") if isinstance(item.get("investigation"), dict) else {}
+    result = item.get("result") if isinstance(item.get("result"), dict) else {}
+    if not investigation and isinstance(result.get("investigation"), dict):
+        investigation = result["investigation"]
+
+    subject = incident.get("subject") or item.get("subject") or ""
+    description = incident.get("description") or item.get("description") or ""
+    evidence = investigation.get("evidence") or ""
+    root_cause = investigation.get("root_cause_hypothesis") or ""
+    proposed_action = (
+        investigation.get("proposed_action")
+        or investigation.get("proposed_fix")
+        or item.get("proposed_action")
+        or ""
+    )
+    searchable = _text_blob(subject, description, evidence, root_cause, proposed_action)
+
+    matched_on = []
+    score = 0
+    normalized_alarm = str(alarm_name or "").strip().lower()
+    normalized_resource = str(resource_id or "").strip().lower()
+    normalized_namespace = str(namespace or "").strip().lower()
+    normalized_metric = str(metric_name or "").strip().lower()
+    normalized_account = str(customer_account_name or "").strip().lower()
+    normalized_region = str(region or "").strip().lower()
+
+    item_resource = str(incident.get("resource_id") or item.get("resource_id") or "").strip().lower()
+    item_account = str(incident.get("account_name") or item.get("account_name") or "").strip().lower()
+    item_region = str(incident.get("region") or item.get("region") or "").strip().lower()
+
+    if normalized_resource and normalized_resource == item_resource:
+        score += 5
+        matched_on.append("resource_id")
+    elif normalized_resource and normalized_resource in searchable:
+        score += 3
+        matched_on.append("resource_id_text")
+
+    if normalized_alarm and normalized_alarm in searchable:
+        score += 4
+        matched_on.append("alarm_name")
+
+    if normalized_metric and normalized_metric in searchable:
+        score += 2
+        matched_on.append("metric_name")
+    if normalized_namespace and normalized_namespace in searchable:
+        score += 1
+        matched_on.append("namespace")
+
+    if normalized_account and normalized_account == item_account:
+        score += 1
+        matched_on.append("account_name")
+    if normalized_region and normalized_region == item_region:
+        score += 1
+        matched_on.append("region")
+
+    keyword_hits = []
+    for keyword in _history_keywords(keywords):
+        if keyword in searchable:
+            keyword_hits.append(keyword)
+    if keyword_hits:
+        score += min(len(keyword_hits), 4)
+        matched_on.append("keywords:" + ",".join(keyword_hits[:4]))
+
+    return score, matched_on
+
+
+def _summarize_incident_history(
+    raw_text,
+    alarm_name="",
+    resource_id="",
+    namespace="",
+    metric_name="",
+    keywords="",
+    current_ticket_id="",
+    customer_account_name="",
+    region="",
+    lookback_days=30,
+):
+    payload = _extract_aws_api_json(raw_text)
+    if not payload:
+        return _limit_text(raw_text)
+
+    raw_items = payload.get("Items") or []
+    items = [_normalize_dynamodb_item(item) for item in raw_items if isinstance(item, dict)]
+    current_ticket = str(current_ticket_id or "").strip()
+    now = datetime.now(timezone.utc)
+    matches = []
+    for item in items:
+        incident = item.get("incident") if isinstance(item.get("incident"), dict) else item
+        ticket_id = str(incident.get("ticket_id") or item.get("ticket_id") or "").strip()
+        if current_ticket and ticket_id == current_ticket:
+            continue
+
+        score, matched_on = _score_history_item(
+            item,
+            alarm_name=alarm_name,
+            resource_id=resource_id,
+            namespace=namespace,
+            metric_name=metric_name,
+            keywords=keywords,
+            customer_account_name=customer_account_name,
+            region=region,
+        )
+        if score <= 0:
+            continue
+
+        investigation = item.get("investigation") if isinstance(item.get("investigation"), dict) else {}
+        remediation = item.get("remediation") if isinstance(item.get("remediation"), dict) else {}
+        created_at = item.get("created_at") or incident.get("created_at")
+        created_iso = _epoch_to_iso(created_at)
+        age_days = None
+        try:
+            age_days = (now - datetime.fromtimestamp(int(created_at), tz=timezone.utc)).days
+        except (TypeError, ValueError, OSError):
+            pass
+
+        matches.append(
+            {
+                "ticket_id": ticket_id,
+                "request_id": item.get("request_id"),
+                "created_at": created_iso,
+                "age_days": age_days,
+                "status": item.get("status"),
+                "subject": _limit_text(incident.get("subject") or item.get("subject"), 180),
+                "resource_id": incident.get("resource_id") or item.get("resource_id"),
+                "account_name": incident.get("account_name") or item.get("account_name"),
+                "region": incident.get("region") or item.get("region"),
+                "score": score,
+                "matched_on": matched_on,
+                "root_cause": _limit_text(
+                    investigation.get("root_cause_hypothesis") or item.get("root_cause_hypothesis"),
+                    220,
+                ),
+                "proposed_action": _limit_text(
+                    investigation.get("proposed_action")
+                    or investigation.get("proposed_fix")
+                    or item.get("proposed_action"),
+                    220,
+                ),
+                "remediation_id": remediation.get("remediation_id") or item.get("remediation_id"),
+                "remediation_status": remediation.get("status") or item.get("remediation_status"),
+            }
+        )
+
+    matches.sort(key=lambda item: (item["score"], item.get("created_at") or ""), reverse=True)
+    matched_created = [match for match in matches if isinstance(match.get("age_days"), int)]
+    last_7_days = sum(1 for match in matched_created if match["age_days"] <= 7)
+    last_30_days = sum(1 for match in matched_created if match["age_days"] <= 30)
+    if len(matches) >= 3 or last_7_days >= 2:
+        classification = "frequent_recurring"
+    elif len(matches) >= 2:
+        classification = "recurring"
+    elif len(matches) == 1:
+        classification = "sporadic_or_rare"
+    else:
+        classification = "no_prior_history_found"
+
+    return _json_dumps(
+        {
+            "incident_history": {
+                "classification": classification,
+                "lookback_days": lookback_days,
+                "table": INCIDENT_HISTORY_TABLE,
+                "scanned_items": payload.get("ScannedCount"),
+                "returned_items": len(items),
+                "matches_found": len(matches),
+                "frequency": {
+                    "last_7_days": last_7_days,
+                    "last_30_days": last_30_days,
+                    "oldest_match": matches[-1]["created_at"] if matches else None,
+                    "newest_match": matches[0]["created_at"] if matches else None,
+                },
+                "query": {
+                    "alarm_name": alarm_name,
+                    "resource_id": resource_id,
+                    "namespace": namespace,
+                    "metric_name": metric_name,
+                    "keywords": _history_keywords(keywords),
+                    "current_ticket_id": current_ticket_id,
+                    "customer_account_name": customer_account_name,
+                    "region": region,
+                },
+                "matches": matches[:10],
+                "caveats": [
+                    "History is based on incident_history rows in the shared DynamoDB table.",
+                    "A historical match is evidence of recurrence, not proof of identical root cause.",
+                ],
+            }
+        }
+    )
+
+
+def _summarize_aws_docs(raw_text):
+    payload = _extract_aws_api_json(raw_text)
+    if not payload:
+        try:
+            payload = json.loads(raw_text)
+        except (TypeError, json.JSONDecodeError):
+            return _limit_text(raw_text)
+
+    results = payload.get("results") if isinstance(payload, dict) else None
+    if isinstance(results, dict):
+        results = results.get("content") or results.get("results") or results.get("documents")
+    if not isinstance(results, list):
+        results = payload.get("content") if isinstance(payload, dict) else []
+    compact = []
+    for result in (results or [])[:5]:
+        if not isinstance(result, dict):
+            compact.append({"text": _limit_text(result, 400)})
+            continue
+        compact.append(
+            {
+                "title": result.get("title") or result.get("page_title"),
+                "url": result.get("url"),
+                "context": _limit_text(result.get("context") or result.get("excerpt") or result.get("text"), 500),
+            }
+        )
+    return _json_dumps({"aws_documentation": compact, "shown": len(compact)})
 
 
 def _extract_aws_api_json(raw_text):
@@ -473,6 +767,7 @@ def _create_nova_wrapper_tools(mcp_client, mcp_tools):
     }
     active_alarms_tool = "cloudwatch-mcp___get_active_alarms"
     aws_api_tool = "aws-api-mcp___call_aws" if "aws-api-mcp___call_aws" in tool_names else ""
+    aws_docs_tool = "aws-knowledge-mcp___search_aws_docs" if "aws-knowledge-mcp___search_aws_docs" in tool_names else ""
     if active_alarms_tool not in tool_names and not aws_api_tool:
         logger.warning(
             "Nova wrapper requires either %r or %r, but available MCP tools are %s",
@@ -540,15 +835,7 @@ def _create_nova_wrapper_tools(mcp_client, mcp_tools):
         raw_result = _call_aws_cli(mcp_client, aws_api_tool, command)
         return _summarize_alarm_details(raw_result)
 
-    @tool(
-        name="get_metric_history",
-        description=(
-            "Read-only CloudWatch tool. Retrieves recent datapoints for one metric. "
-            "Pass dimensions_json as a JSON array such as "
-            "[{\"Name\":\"InstanceId\",\"Value\":\"i-abc\"}]."
-        ),
-    )
-    def get_metric_history(
+    def _get_metric_history_result(
         namespace: str,
         metric_name: str,
         dimensions_json: str = "[]",
@@ -556,17 +843,6 @@ def _create_nova_wrapper_tools(mcp_client, mcp_tools):
         period_seconds: int = 60,
         statistic: str = "Average",
     ) -> str:
-        """Get recent metric datapoints.
-
-        Args:
-            namespace: CloudWatch namespace, for example AWS/EC2.
-            metric_name: Metric name, for example CPUUtilization.
-            dimensions_json: JSON array of dimension objects with Name and Value.
-            minutes: Lookback window in minutes, clamped to 5..1440.
-            period_seconds: CloudWatch period, clamped to 60..3600.
-            statistic: Statistic such as Average, Maximum, Minimum, Sum, SampleCount.
-        """
-        logger.info("Wrapper tool call intercepted: get_metric_history")
         if not str(namespace or "").strip() or not str(metric_name or "").strip():
             return "MCP tool error: namespace and metric_name are required."
 
@@ -578,7 +854,8 @@ def _create_nova_wrapper_tools(mcp_client, mcp_tools):
         try:
             dimensions_clause = _metric_dimensions_cli(dimensions_json)
         except ValueError as exc:
-            return f"MCP tool error: {exc}"
+            logger.warning("Ignoring invalid metric dimensions_json to avoid retry loops: %s", exc)
+            dimensions_clause = ""
 
         start_time, end_time, _ = _utc_window(minutes)
         period = _clamp_int(period_seconds, default=60, minimum=60, maximum=3600)
@@ -595,6 +872,81 @@ def _create_nova_wrapper_tools(mcp_client, mcp_tools):
         )
         raw_result = _call_aws_cli(mcp_client, aws_api_tool, command)
         return _summarize_metric_history(raw_result, selected_statistic)
+
+    @tool(
+        name="get_metric_history",
+        description=(
+            "Read-only CloudWatch tool. Retrieves recent datapoints for one metric. "
+            "For EC2 instance metrics, prefer get_ec2_metric_history. For other "
+            "namespaces, pass dimensions_json as a JSON array such as "
+            "[{\"Name\":\"ClusterName\",\"Value\":\"cluster-a\"}]."
+        ),
+    )
+    def get_metric_history(
+        namespace: str,
+        metric_name: str,
+        dimensions_json: str = "[]",
+        minutes: int = 60,
+        period_seconds: int = 60,
+        statistic: str = "Average",
+    ) -> str:
+        """Get recent metric datapoints.
+
+        Args:
+            namespace: CloudWatch namespace, for example AWS/ECS.
+            metric_name: Metric name, for example CPUUtilization.
+            dimensions_json: JSON array of dimension objects with Name and Value.
+            minutes: Lookback window in minutes, clamped to 5..1440.
+            period_seconds: CloudWatch period, clamped to 60..3600.
+            statistic: Statistic such as Average, Maximum, Minimum, Sum, SampleCount.
+        """
+        logger.info("Wrapper tool call intercepted: get_metric_history")
+        return _get_metric_history_result(
+            namespace=namespace,
+            metric_name=metric_name,
+            dimensions_json=dimensions_json,
+            minutes=minutes,
+            period_seconds=period_seconds,
+            statistic=statistic,
+        )
+
+    @tool(
+        name="get_ec2_metric_history",
+        description=(
+            "Read-only CloudWatch tool. Retrieves recent EC2 instance metric datapoints. "
+            "Use this when the affected resource ID starts with i-; pass only the "
+            "instance_id, metric_name, lookback minutes, period, and statistic."
+        ),
+    )
+    def get_ec2_metric_history(
+        instance_id: str,
+        metric_name: str = "CPUUtilization",
+        minutes: int = 60,
+        period_seconds: int = 60,
+        statistic: str = "Average",
+    ) -> str:
+        """Get recent EC2 metric datapoints for a single instance.
+
+        Args:
+            instance_id: EC2 instance ID, for example i-0123456789abcdef0.
+            metric_name: EC2 metric name, for example CPUUtilization.
+            minutes: Lookback window in minutes, clamped to 5..1440.
+            period_seconds: CloudWatch period, clamped to 60..3600.
+            statistic: Statistic such as Average, Maximum, Minimum, Sum, SampleCount.
+        """
+        logger.info("Wrapper tool call intercepted: get_ec2_metric_history")
+        normalized_instance_id = str(instance_id or "").strip()
+        if not normalized_instance_id:
+            return "MCP tool error: instance_id is required."
+        dimensions_json = json.dumps([{"Name": "InstanceId", "Value": normalized_instance_id}])
+        return _get_metric_history_result(
+            namespace="AWS/EC2",
+            metric_name=metric_name,
+            dimensions_json=dimensions_json,
+            minutes=minutes,
+            period_seconds=period_seconds,
+            statistic=statistic,
+        )
 
     @tool(
         name="list_log_groups",
@@ -669,17 +1021,138 @@ def _create_nova_wrapper_tools(mcp_client, mcp_tools):
         raw_result = _call_aws_cli(mcp_client, aws_api_tool, command)
         return _summarize_log_events(raw_result)
 
+    @tool(
+        name="search_incident_history",
+        description=(
+            "Read-only incident-history tool. Searches prior Freshdesk/headless incident "
+            "records in the MSP DynamoDB ticket table to classify whether an alarm or "
+            "resource problem is new, sporadic, recurring, or frequent."
+        ),
+    )
+    def search_incident_history(
+        alarm_name: str = "",
+        resource_id: str = "",
+        namespace: str = "",
+        metric_name: str = "",
+        keywords: str = "",
+        current_ticket_id: str = "",
+        lookback_days: int = 30,
+        max_items: int = 100,
+    ) -> str:
+        """Search previous incident records.
+
+        Args:
+            alarm_name: Current CloudWatch alarm name, when known.
+            resource_id: Affected AWS resource ID, when known.
+            namespace: Metric namespace, for example AWS/EC2.
+            metric_name: Metric name, for example CPUUtilization.
+            keywords: Comma- or newline-separated extra search terms.
+            current_ticket_id: Current Freshdesk ticket ID to exclude from matches.
+            lookback_days: History window, clamped to 1..365.
+            max_items: Maximum DynamoDB rows to inspect, clamped to 20..500.
+        """
+        logger.info("Wrapper tool call intercepted: search_incident_history")
+        if not aws_api_tool:
+            return "MCP tool error: aws-api-mcp___call_aws is not available for incident history lookup."
+
+        bounded_days = _clamp_int(lookback_days, default=30, minimum=1, maximum=365)
+        bounded_items = _clamp_int(max_items, default=100, minimum=20, maximum=500)
+        since_epoch = int((datetime.now(timezone.utc) - timedelta(days=bounded_days)).timestamp())
+        expression_names = {
+            "#record_type": "record_type",
+            "#created_at": "created_at",
+            "#status": "status",
+            "#subject": "subject",
+            "#description": "description",
+            "#region": "region",
+        }
+        expression_values = {
+            ":record_type": {"S": "incident_history"},
+            ":since": {"N": str(since_epoch)},
+        }
+        command = (
+            "aws dynamodb scan "
+            f"--table-name {_quote_cli_value(INCIDENT_HISTORY_TABLE)} "
+            "--filter-expression '#record_type = :record_type AND #created_at >= :since' "
+            f"--expression-attribute-names {_quote_cli_value(json.dumps(expression_names, separators=(',', ':')))} "
+            f"--expression-attribute-values {_quote_cli_value(json.dumps(expression_values, separators=(',', ':')))} "
+            "--projection-expression 'request_id,#record_type,ticket_id,#status,#created_at,updated_at,#subject,#description,account_name,#region,resource_id,investigation,remediation' "
+            f"--max-items {bounded_items} "
+            "--output json"
+        )
+        # Incident history is stored in the MSP account, so force default credentials
+        # even when the current CloudWatch investigation targets a customer account.
+        raw_result = _call_mcp_tool(
+            mcp_client,
+            aws_api_tool,
+            {
+                "account_name": "default",
+                "region": _safe_region(),
+                "cli_command": command,
+            },
+        )
+        return _summarize_incident_history(
+            raw_result,
+            alarm_name=alarm_name,
+            resource_id=resource_id,
+            namespace=namespace,
+            metric_name=metric_name,
+            keywords=keywords,
+            current_ticket_id=current_ticket_id,
+            customer_account_name=_current_ctx.get("account_name", ""),
+            region=_safe_region(),
+            lookback_days=bounded_days,
+        )
+
     wrapper_tools = [
         get_active_alarms,
         get_alarm_details,
         get_metric_history,
+        get_ec2_metric_history,
         list_log_groups,
         search_log_events,
+        search_incident_history,
     ]
+    if aws_docs_tool:
+        @tool(
+            name="search_aws_docs",
+            description=(
+                "Read-only AWS Knowledge MCP tool. Searches official AWS documentation "
+                "for troubleshooting guidance related to the alarm, metric, or service."
+            ),
+        )
+        def search_aws_docs(query: str, topics: str = "troubleshooting,general", max_results: int = 5) -> str:
+            """Search official AWS documentation.
+
+            Args:
+                query: Focused AWS troubleshooting query.
+                topics: Comma-separated topic filters, for example troubleshooting,general.
+                max_results: Maximum results, clamped to 1..10.
+            """
+            logger.info("Wrapper tool call intercepted: search_aws_docs")
+            if not str(query or "").strip():
+                return "MCP tool error: query is required."
+            topic_values = [
+                topic.strip()
+                for topic in str(topics or "troubleshooting,general").split(",")
+                if topic.strip()
+            ][:5]
+            raw_result = _call_mcp_tool(
+                mcp_client,
+                aws_docs_tool,
+                {
+                    "query": str(query).strip(),
+                    "topics": topic_values or ["troubleshooting", "general"],
+                    "max_results": _clamp_int(max_results, default=5, minimum=1, maximum=10),
+                },
+            )
+            return _summarize_aws_docs(raw_result)
+
+        wrapper_tools.append(search_aws_docs)
     logger.info(
         "Using Nova wrapper tools: exposed=%s, backing_mcp_tools=%s",
         [wrapped.tool_name for wrapped in wrapper_tools],
-        sorted(name for name in [active_alarms_tool, aws_api_tool] if name),
+        sorted(name for name in [active_alarms_tool, aws_api_tool, aws_docs_tool] if name),
     )
     return wrapper_tools
 

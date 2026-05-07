@@ -211,6 +211,45 @@ class RemediationLifecycleTests(unittest.TestCase):
         self.assertEqual(approved["approved_by"], "ops@example.com")
         self.assertEqual(approved["execution"], "not_executed")
 
+    def test_incident_history_record_preserves_ticket_search_fields(self):
+        table = FakeTable()
+        service = HeadlessInvestigationService(table=table, freshdesk_client=FakeFreshdeskClient())
+        incident = normalize_freshdesk_payload(
+            {
+                "ticket_id": "12345",
+                "subject": "SQL Server EC2 CPU high",
+                "description": "CloudWatch CPUUtilization alarm on i-abc123",
+                "account_name": "runtime_test",
+                "region": "us-east-1",
+                "resource_id": "i-abc123",
+            }
+        )
+
+        history = service.create_incident_history(
+            "req-1",
+            incident,
+            {
+                "agent_type": "runtime_diagnostics",
+                "root_cause_hypothesis": "sqlservr is consuming CPU",
+                "evidence": "CPUUtilization above threshold",
+                "proposed_action": "Inspect SQL workload",
+            },
+            {
+                "remediation_id": "rem-123",
+                "status": "pending",
+                "proposed_action": "Inspect SQL workload",
+            },
+            {"id": 99},
+        )
+
+        self.assertEqual(history["record_type"], "incident_history")
+        self.assertEqual(history["ticket_id"], "12345")
+        self.assertEqual(history["account_name"], "runtime_test")
+        self.assertEqual(history["resource_id"], "i-abc123")
+        self.assertEqual(history["remediation"]["remediation_id"], "rem-123")
+        self.assertGreater(history["ttl"], history["created_at"])
+        self.assertIn("incident-history-12345", table.items)
+
 
 class DirectRouterTests(unittest.TestCase):
     def test_direct_routing_requires_explicit_flag_even_when_arn_exists(self):
@@ -346,6 +385,12 @@ Reboot i-abc123."""
         ]
         self.assertEqual(len(remediation_items), 1)
         self.assertEqual(remediation_items[0]["status"], "pending")
+
+        history_item = table.items["incident-history-12345"]
+        self.assertEqual(history_item["record_type"], "incident_history")
+        self.assertEqual(history_item["ticket_id"], "12345")
+        self.assertEqual(history_item["remediation"]["status"], "pending")
+        self.assertEqual(request_item["result"]["incident_history"]["request_id"], "incident-history-12345")
 
 
 if __name__ == "__main__":

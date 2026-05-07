@@ -53,6 +53,7 @@ SUPERVISOR_PROMPT = f"""You are an AWS Multi-Service Supervisor that routes requ
 7. Keep your own synthesis brief (under 100 words). The specialist response IS the answer — relay it directly without extensive paraphrasing.
 8. For Jira queries (search, list, get tickets): use manage_jira — it supports full JQL search
 9. Use check_cloudwatch for alarms, metrics, logs, and observable monitoring evidence.
+9a. For incident or Freshdesk alarm investigations, ask check_cloudwatch to include prior incident history/frequency and official AWS documentation guidance when available.
 10. Use check_runtime_diagnostics when the request asks to enter/check a server, inspect disk, memory, CPU, processes, failed services, EC2 SSM status, ECS task/service health, stopped reasons, or RDS status/events/runtime symptoms.
 11. Runtime Diagnostics is read-only evidence collection only. Do not ask it to remediate.
 12. Do not call raw AWS tools directly when a suitable specialist exists.

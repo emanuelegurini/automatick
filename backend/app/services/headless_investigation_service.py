@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 TABLE_NAME = os.getenv("CHAT_REQUESTS_TABLE", "msp-assistant-chat-requests")
 REQUEST_TTL_SECONDS = 7 * 24 * 60 * 60
 REMEDIATION_TTL_SECONDS = 30 * 24 * 60 * 60
+INCIDENT_HISTORY_TTL_SECONDS = int(os.getenv("INCIDENT_HISTORY_TTL_DAYS", "365")) * 24 * 60 * 60
 
 _dynamodb = boto3.resource("dynamodb", region_name=os.getenv("AWS_REGION", "us-east-1"))
 _table = _dynamodb.Table(TABLE_NAME)
@@ -93,6 +94,13 @@ def _clean_html(value: Any) -> str:
     text = re.sub(r"</p\s*>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", "", text)
     return text.strip()
+
+
+def _truncate_text(value: Any, max_chars: int) -> str:
+    text = str(value or "")
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + f"... [truncated {len(text) - max_chars} chars]"
 
 
 def _sanitize_account_name(value: Any) -> str:
@@ -370,6 +378,49 @@ class HeadlessInvestigationService:
         self.table.put_item(Item=_convert_floats(item))
         return item
 
+    def create_incident_history(
+        self,
+        request_id: str,
+        incident: Incident,
+        investigation: Dict[str, Any],
+        remediation: Dict[str, Any],
+        freshdesk_note: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        now = int(time.time())
+        history_id = f"incident-history-{incident.ticket_id}"
+        item = {
+            "request_id": history_id,
+            "record_type": "incident_history",
+            "source_request_id": request_id,
+            "source": "freshdesk",
+            "ticket_id": incident.ticket_id,
+            "subject": _truncate_text(incident.subject, 500),
+            "description": _truncate_text(incident.description, 2000),
+            "account_name": incident.account_name,
+            "region": incident.region,
+            "resource_id": incident.resource_id or "",
+            "status": "complete",
+            "agent_type": investigation.get("agent_type", "unknown"),
+            "investigation": {
+                "root_cause_hypothesis": _truncate_text(investigation.get("root_cause_hypothesis"), 1000),
+                "evidence": _truncate_text(investigation.get("evidence"), 2000),
+                "proposed_fix": _truncate_text(investigation.get("proposed_fix"), 1000),
+                "proposed_action": _truncate_text(investigation.get("proposed_action"), 1000),
+                "risk_impact": _truncate_text(investigation.get("risk_impact"), 1000),
+            },
+            "remediation": {
+                "remediation_id": remediation.get("remediation_id", ""),
+                "status": remediation.get("status", ""),
+                "proposed_action": _truncate_text(remediation.get("proposed_action"), 1000),
+            },
+            "freshdesk_note_id": str((freshdesk_note or {}).get("id", "")),
+            "created_at": now,
+            "updated_at": now,
+            "ttl": now + INCIDENT_HISTORY_TTL_SECONDS,
+        }
+        self.table.put_item(Item=_convert_floats(item))
+        return item
+
     def get_remediation(self, remediation_id: str) -> Optional[Dict[str, Any]]:
         response = self.table.get_item(Key={"request_id": f"remediation-{remediation_id}"})
         item = response.get("Item")
@@ -420,6 +471,8 @@ Ticket:
 Evidence to inspect:
 {resource_clause}- Check CloudWatch alarms in ALARM/INSUFFICIENT_DATA state.
 - Check relevant CloudWatch metrics and recent logs when available.
+- Check whether the same or similar incident happened before in ticket history. Classify it as no prior history, sporadic/rare, recurring, or frequent recurring.
+- If the issue appears recurring/frequent or unclear, use available knowledge-base/AWS documentation evidence for likely causes and recommended investigation paths.
 - Use AWS API read-only inspection for related EC2, load balancer, ECS, Lambda, RDS, or other resource context when useful.
 
 Return concise Markdown with exactly these headings:
@@ -506,11 +559,13 @@ The proposed action must be a human-readable remediation proposal only. It must 
             )
 
             note_result = await self.freshdesk_client.post_private_note(incident.ticket_id, note_body)
+            history = self.create_incident_history(request_id, incident, investigation, remediation, note_result)
             result = {
                 "success": True,
                 "incident": asdict(incident),
                 "investigation": investigation,
                 "remediation": remediation,
+                "incident_history": history,
                 "freshdesk_note": note_result,
                 "freshdesk_note_posted": True,
             }

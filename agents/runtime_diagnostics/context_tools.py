@@ -99,7 +99,12 @@ SSM_COMMAND_PROFILES: dict[str, CommandProfile] = {
         command=(
             'echo "### load"; uptime; '
             'echo "### top cpu processes"; '
-            "ps -eo pid,ppid,comm,%cpu,%mem --sort=-%cpu | head -20"
+            "ps -eo pid,ppid,comm,%cpu,%mem --sort=-%cpu | head -20; "
+            'echo "### docker containers"; '
+            "if command -v docker >/dev/null 2>&1; then "
+            "docker ps --format 'table {{.Names}}\\t{{.Status}}\\t{{.Image}}'; "
+            "docker stats --no-stream --format 'table {{.Name}}\\t{{.CPUPerc}}\\t{{.MemUsage}}' 2>/dev/null || true; "
+            "else echo 'Docker not installed'; fi"
         ),
     ),
     "failed_services": CommandProfile(
@@ -133,7 +138,11 @@ SSM_COMMAND_PROFILES: dict[str, CommandProfile] = {
         description="Top running processes by CPU.",
         command=(
             'echo "### process snapshot"; '
-            "ps -eo pid,ppid,user,comm,%cpu,%mem,etime --sort=-%cpu | head -30"
+            "ps -eo pid,ppid,user,comm,%cpu,%mem,etime --sort=-%cpu | head -30; "
+            'echo "### docker containers"; '
+            "if command -v docker >/dev/null 2>&1; then "
+            "docker ps --format 'table {{.Names}}\\t{{.Status}}\\t{{.Image}}'; "
+            "else echo 'Docker not installed'; fi"
         ),
     ),
 }
@@ -290,7 +299,7 @@ def _tag_map(tags: list[dict] | None) -> dict[str, str]:
 
 
 def _essential_tags(tags: dict[str, str]) -> dict[str, str]:
-    keep = {"Name", "Project", "owner", "ManagedBy", "Environment", "Customer", "Service", DIAGNOSTICS_TAG_KEY}
+    keep = {"Name", "project", "Project", "owner", "ManagedBy", "Environment", "Customer", "Service", "Workload", DIAGNOSTICS_TAG_KEY}
     return {key: value for key, value in tags.items() if key in keep}
 
 
