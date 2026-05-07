@@ -290,7 +290,7 @@ def _tag_map(tags: list[dict] | None) -> dict[str, str]:
 
 
 def _essential_tags(tags: dict[str, str]) -> dict[str, str]:
-    keep = {"Name", "Environment", "Customer", "Service", DIAGNOSTICS_TAG_KEY}
+    keep = {"Name", "Project", "owner", "ManagedBy", "Environment", "Customer", "Service", DIAGNOSTICS_TAG_KEY}
     return {key: value for key, value in tags.items() if key in keep}
 
 

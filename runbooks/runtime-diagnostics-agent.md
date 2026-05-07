@@ -21,12 +21,22 @@ aws cloudformation deploy \
     VpcId="<vpc-id>" \
     SubnetId="<subnet-id>" \
     KeyName="" \
+    ProjectTagValue="${PROJECT_TAG_VALUE:-mps-ops-utomation-poc}" \
+    OwnerTagValue="${OWNER_TAG_VALUE:-simone.ferraro}" \
+    EnvironmentTagValue="test" \
+    ServiceTagValue="runtime-diagnostics" \
+    CustomerTagValue="runtime-test" \
   --region us-east-1
 ```
 
 Use a subnet with outbound access to SSM for the PoC. For production-style
 private subnets, provide VPC endpoints for `ssm`, `ssmmessages`, and
 `ec2messages`.
+
+The template applies the project-standard governance tags `Project` and `owner`
+plus `ManagedBy`, `Environment`, `Service`, and `Customer`. The EC2 instance also
+keeps `AutomatickDiagnostics=true`, which is required by the SSM `SendCommand`
+condition in the cross-account diagnostics role.
 
 `AgentPrincipalArn` must be the role that will call `sts:AssumeRole` at runtime.
 For this feature, prefer the AgentCore execution role of `runtime_diagnostics`,

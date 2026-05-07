@@ -35,6 +35,26 @@ Parameters:
     Type: String
     Default: ""
     Description: Optional EC2 key pair name. Leave empty for SSM-only access.
+  ProjectTagValue:
+    Type: String
+    Default: mps-ops-utomation-poc
+    Description: Project governance tag value.
+  OwnerTagValue:
+    Type: String
+    Default: simone.ferraro
+    Description: Owner governance tag value. Uses the project-standard lowercase owner key.
+  EnvironmentTagValue:
+    Type: String
+    Default: test
+    Description: Environment tag value.
+  ServiceTagValue:
+    Type: String
+    Default: runtime-diagnostics
+    Description: Service tag value.
+  CustomerTagValue:
+    Type: String
+    Default: runtime-test
+    Description: Customer/account-context tag value for the test target.
 
 Conditions:
   HasKeyName: !Not [!Equals [!Ref KeyName, ""]]
@@ -114,6 +134,19 @@ Resources:
                 Action:
                   - sts:GetCallerIdentity
                 Resource: "*"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTagValue
+        - Key: owner
+          Value: !Ref OwnerTagValue
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Environment
+          Value: !Ref EnvironmentTagValue
+        - Key: Service
+          Value: !Ref ServiceTagValue
+        - Key: Customer
+          Value: !Ref CustomerTagValue
 
   RuntimeDiagnosticsInstanceRole:
     Type: AWS::IAM::Role
@@ -127,6 +160,19 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTagValue
+        - Key: owner
+          Value: !Ref OwnerTagValue
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Environment
+          Value: !Ref EnvironmentTagValue
+        - Key: Service
+          Value: !Ref ServiceTagValue
+        - Key: Customer
+          Value: !Ref CustomerTagValue
 
   RuntimeDiagnosticsInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -145,6 +191,18 @@ Resources:
       Tags:
         - Key: Name
           Value: automatick-runtime-diagnostics-test-sg
+        - Key: Project
+          Value: !Ref ProjectTagValue
+        - Key: owner
+          Value: !Ref OwnerTagValue
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Environment
+          Value: !Ref EnvironmentTagValue
+        - Key: Service
+          Value: !Ref ServiceTagValue
+        - Key: Customer
+          Value: !Ref CustomerTagValue
 
   RuntimeDiagnosticsInstance:
     Type: AWS::EC2::Instance
@@ -172,7 +230,17 @@ Resources:
         - Key: AutomatickDiagnostics
           Value: "true"
         - Key: Environment
-          Value: test
+          Value: !Ref EnvironmentTagValue
+        - Key: Project
+          Value: !Ref ProjectTagValue
+        - Key: owner
+          Value: !Ref OwnerTagValue
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Service
+          Value: !Ref ServiceTagValue
+        - Key: Customer
+          Value: !Ref CustomerTagValue
 
 Outputs:
   DiagnosticsRoleArn:
